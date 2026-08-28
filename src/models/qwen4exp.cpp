@@ -662,31 +662,70 @@ ggml_tensor * llama_model_qwen4exp::graph::build_qsa_top_k(
 
     // rectify each head dot product before the sum, as in the DeepSeek lightning indexer
     // mul_mat matches ne[2], so the queries of stream s only meet the blocks of stream s
-    ggml_tensor * score = ggml_mul_mat(ctx0, pooled,
-            ggml_reshape_3d(ctx0, ggml_cont(ctx0, q), idx_dim, n_idx_h*n_tps, n_stream));
-    score = ggml_reshape_4d(ctx0, score, n_blocks, n_idx_h, n_tps, n_stream);
-    score = ggml_relu(ctx0, score);
-    score = ggml_cont(ctx0, ggml_permute(ctx0, score, 1, 0, 2, 3));
-    score = ggml_sum_rows(ctx0, score);
-    score = ggml_reshape_3d(ctx0, score, n_blocks, n_tps, n_stream);
-    cb(score, "indexer_score", il);
+    ggml_tensor * q_flat = ggml_reshape_3d(ctx0, ggml_cont(ctx0, q), idx_dim, n_idx_h*n_tps, n_stream);
 
-    // one value per block, so it is cheaper to bias here than after the cells are expanded
-    if (blk_bias) {
-        score = ggml_add(ctx0, score, inp->bias);
-    }
+    ggml_tensor * expanded;
+    if (n_tps > 8) {
+        // batched prefill: with q as the LEFT operand the heads land in dim 0 (h fastest),
+        // so the head sum needs no permute+cont, and the summed score comes out directly
+        // in the [n_tps, n_blocks] layout the expansion gather wants. This removes two of
+        // the three full-size permute copies (~335MB/layer/chunk at 32k); the transpose
+        // feeding the row-wise top-k below is the only one that survives.
+        ggml_tensor * score = ggml_mul_mat(ctx0, q_flat, pooled);      // [nh*n_tps, n_blocks, ns]
+        score = ggml_relu(ctx0, score);
+        score = ggml_reshape_2d(ctx0, score, n_idx_h, n_tps*n_blocks*n_stream);
+        score = ggml_sum_rows(ctx0, score);
+        score = ggml_reshape_3d(ctx0, score, n_tps, n_blocks, n_stream);
+        cb(score, "indexer_score", il);
 
-    // every token of a block gets the block score; the budget is whole blocks, so top-k cuts on a block boundary
-    ggml_tensor * expanded = ggml_get_rows(ctx0,
-            ggml_cont(ctx0, ggml_permute(ctx0, score, 1, 0, 2, 3)), inp->cell_blk);
-    expanded = ggml_cont(ctx0, ggml_permute(ctx0, expanded, 1, 0, 2, 3));
+        // one value per block, so it is cheaper to bias here than after the cells are
+        // expanded; the bias tensor is block-sized (n_blocks x n_tps), so transposing it
+        // to match score's [n_tps, n_blocks] layout is far cheaper than transposing the
+        // n_kv-sized expanded tensor below
+        if (blk_bias) {
+            score = ggml_add(ctx0, score, ggml_cont(ctx0, ggml_permute(ctx0, inp->bias, 1, 0, 2, 3)));
+        }
 
-    if (blk_bias) {
-        // flash attention keeps the mask in f16; the scores are f32
-        ggml_tensor * mask = kq_mask->type == GGML_TYPE_F32 ? kq_mask : ggml_cast(ctx0, kq_mask, GGML_TYPE_F32);
-        expanded = ggml_add(ctx0, expanded, ggml_reshape_3d(ctx0, mask, n_kv, n_tps, n_stream));
+        // give every token of a block the block score; the budget is a whole number of
+        // blocks, so the top-k cut still lands on a block boundary
+        expanded = ggml_get_rows(ctx0, score, inp->cell_blk);          // [n_tps, n_kv, ns]
+        expanded = ggml_cont(ctx0, ggml_permute(ctx0, expanded, 1, 0, 2, 3));
+
+        if (blk_bias) {
+            // flash attention keeps the mask in f16; the scores are f32
+            ggml_tensor * mask = kq_mask->type == GGML_TYPE_F32 ? kq_mask : ggml_cast(ctx0, kq_mask, GGML_TYPE_F32);
+            expanded = ggml_add(ctx0, expanded, ggml_reshape_3d(ctx0, mask, n_kv, n_tps, n_stream));
+        } else {
+            expanded = ggml_add(ctx0, expanded, inp->bias);
+        }
     } else {
-        expanded = ggml_add(ctx0, expanded, inp->bias);
+        // decode keeps pooled as the left operand: the swap would put the score matmul
+        // on the tiled MM path with nh=4 rows (the skinny-m pathology); at n_tps <= 8 the
+        // permutes are tiny anyway
+        ggml_tensor * score = ggml_mul_mat(ctx0, pooled, q_flat);
+        score = ggml_reshape_4d(ctx0, score, n_blocks, n_idx_h, n_tps, n_stream);
+        score = ggml_relu(ctx0, score);
+        score = ggml_cont(ctx0, ggml_permute(ctx0, score, 1, 0, 2, 3));
+        score = ggml_sum_rows(ctx0, score);
+        score = ggml_reshape_3d(ctx0, score, n_blocks, n_tps, n_stream);
+        cb(score, "indexer_score", il);
+
+        // one value per block, so it is cheaper to bias here than after the cells are expanded
+        if (blk_bias) {
+            score = ggml_add(ctx0, score, inp->bias);
+        }
+
+        expanded = ggml_get_rows(ctx0,
+                ggml_cont(ctx0, ggml_permute(ctx0, score, 1, 0, 2, 3)), inp->cell_blk);
+        expanded = ggml_cont(ctx0, ggml_permute(ctx0, expanded, 1, 0, 2, 3));
+
+        if (blk_bias) {
+            // flash attention keeps the mask in f16; the scores are f32
+            ggml_tensor * mask = kq_mask->type == GGML_TYPE_F32 ? kq_mask : ggml_cast(ctx0, kq_mask, GGML_TYPE_F32);
+            expanded = ggml_add(ctx0, expanded, ggml_reshape_3d(ctx0, mask, n_kv, n_tps, n_stream));
+        } else {
+            expanded = ggml_add(ctx0, expanded, inp->bias);
+        }
     }
     cb(expanded, "indexer_score_tokens", il);
 
