@@ -656,6 +656,10 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
             n_embd, hc, n_tokens, 1);
     cb(res_hc, "hc_init", -1);
 
+    // unmasked nextn embeddings feed the MTP draft head one h row per TOKEN (its cache
+    // covers the whole prompt), so the last-layer output-row trim must not drop rows then
+    const bool h_nextn_all = cparams.embeddings_nextn && !cparams.embeddings_nextn_masked;
+
     for (int il = 0; il < n_layer; ++il) {
         res->t_layer_inp[il] = res_hc;
 
@@ -679,7 +683,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
             cur = build_layer_attn(inp->get_attn(), mctx_hyb, cur, inp_pos, sections, il);
         }
 
-        if (il == n_layer - 1 && inp_out_ids) {
+        if (il == n_layer - 1 && inp_out_ids && !h_nextn_all) {
             // everything below is per token, so drop the rows that produce no output
             cur    = ggml_get_rows(ctx0, cur,    inp_out_ids);
             inject = ggml_get_rows(ctx0, inject, inp_out_ids);
@@ -710,10 +714,10 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
     // the widened pre-mixer stream seeds the MTP draft head: its combiner applies
     // pre_fc_norm_hidden on the raw hc-wide residual, so export it before the mixer
     {
-        ggml_tensor * h_wide = ggml_reshape_2d(ctx0, res_hc, hc * n_embd, n_tokens);
-        if (inp_out_ids && cparams.embeddings_nextn_masked) {
-            h_wide = ggml_get_rows(ctx0, h_wide, inp_out_ids);
-        }
+        // the last-layer trim already reduced res_hc to exactly the output rows (the
+        // masked selection); in the unmasked mode the trim was skipped and every
+        // token's row is still here, so ne[2] is the correct row count either way
+        ggml_tensor * h_wide = ggml_reshape_2d(ctx0, res_hc, hc * n_embd, res_hc->ne[2]);
         cb(h_wide, "h_nextn", -1);
         // the view has no consumer in the graph: expand it so the scheduler assigns a backend
         ggml_build_forward_expand(gf, h_wide);
@@ -724,6 +728,12 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
     ggml_tensor * cur = build_hc_mix(res_hc,
             model.hc_head_norm, model.hc_head_down, model.hc_head_up,
             nullptr, nullptr, -1);
+
+    if (h_nextn_all && inp_out_ids) {
+        // the in-loop trim was skipped to keep every token's h row; drop the
+        // non-output rows here instead, after the export above captured them all
+        cur = ggml_get_rows(ctx0, cur, inp_out_ids);
+    }
 
     cb(cur, "result_norm", -1);
     res->t_embd = cur;

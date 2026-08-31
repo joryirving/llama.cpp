@@ -1,4 +1,4 @@
-From 1bfc3ea9eba0e41ed43ead491f553386b60a7dfa Mon Sep 17 00:00:00 2001
+From e218e18468460cb95ba9e879a1116666f0546ec1 Mon Sep 17 00:00:00 2001
 From: Joakim Hansson <joakim.hansson87@gmail.com>
 Date: Thu, 27 Aug 2026 15:00:52 +0000
 Subject: [PATCH 10/10] qwen4exp: fix speculative decoding and add native MTP
@@ -39,9 +39,9 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
  src/llama-model.h               |   7 +
  src/models/delta-net-base.cpp   |  18 ++
  src/models/models.h             |   6 +
- src/models/qwen4exp.cpp         | 464 ++++++++++++++++++++++++++++----
+ src/models/qwen4exp.cpp         | 476 ++++++++++++++++++++++++++++----
  tools/server/server-context.cpp |  38 ++-
- 14 files changed, 598 insertions(+), 68 deletions(-)
+ 14 files changed, 609 insertions(+), 69 deletions(-)
 
 diff --git a/common/common.cpp b/common/common.cpp
 index d162a3880..b62647c60 100644
@@ -395,7 +395,7 @@ index 0caeed0bf..f10c24d52 100644
  };
  
 diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
-index 0f77db799..333197c36 100644
+index 0f77db799..4c3e734c0 100644
 --- a/src/models/qwen4exp.cpp
 +++ b/src/models/qwen4exp.cpp
 @@ -7,6 +7,11 @@
@@ -850,17 +850,37 @@ index 0f77db799..333197c36 100644
  // Hyper-connections keep hc parallel residual streams [n_embd, hc, T] in place of layer norms.
  // Returns the mixed [n_embd, T] stream; `inject` gets the [hc, T] scatter weights.
  ggml_tensor * llama_model_qwen4exp::graph::build_hc_mix(
-@@ -390,6 +707,19 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -339,6 +656,10 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+             n_embd, hc, n_tokens, 1);
+     cb(res_hc, "hc_init", -1);
+ 
++    // unmasked nextn embeddings feed the MTP draft head one h row per TOKEN (its cache
++    // covers the whole prompt), so the last-layer output-row trim must not drop rows then
++    const bool h_nextn_all = cparams.embeddings_nextn && !cparams.embeddings_nextn_masked;
++
+     for (int il = 0; il < n_layer; ++il) {
+         res->t_layer_inp[il] = res_hc;
+ 
+@@ -362,7 +683,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+             cur = build_layer_attn(inp->get_attn(), mctx_hyb, cur, inp_pos, sections, il);
+         }
+ 
+-        if (il == n_layer - 1 && inp_out_ids) {
++        if (il == n_layer - 1 && inp_out_ids && !h_nextn_all) {
+             // everything below is per token, so drop the rows that produce no output
+             cur    = ggml_get_rows(ctx0, cur,    inp_out_ids);
+             inject = ggml_get_rows(ctx0, inject, inp_out_ids);
+@@ -390,11 +711,30 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
          cb(res_hc, "l_last", il);
      }
  
 +    // the widened pre-mixer stream seeds the MTP draft head: its combiner applies
 +    // pre_fc_norm_hidden on the raw hc-wide residual, so export it before the mixer
 +    {
-+        ggml_tensor * h_wide = ggml_reshape_2d(ctx0, res_hc, hc * n_embd, n_tokens);
-+        if (inp_out_ids && cparams.embeddings_nextn_masked) {
-+            h_wide = ggml_get_rows(ctx0, h_wide, inp_out_ids);
-+        }
++        // the last-layer trim already reduced res_hc to exactly the output rows (the
++        // masked selection); in the unmasked mode the trim was skipped and every
++        // token's row is still here, so ne[2] is the correct row count either way
++        ggml_tensor * h_wide = ggml_reshape_2d(ctx0, res_hc, hc * n_embd, res_hc->ne[2]);
 +        cb(h_wide, "h_nextn", -1);
 +        // the view has no consumer in the graph: expand it so the scheduler assigns a backend
 +        ggml_build_forward_expand(gf, h_wide);
@@ -870,7 +890,18 @@ index 0f77db799..333197c36 100644
      // the final mixer is the output norm: there is no separate one
      ggml_tensor * cur = build_hc_mix(res_hc,
              model.hc_head_norm, model.hc_head_down, model.hc_head_up,
-@@ -1390,17 +1720,49 @@ ggml_tensor * llama_model_qwen4exp::graph::build_conv_state_at(
+             nullptr, nullptr, -1);
+ 
++    if (h_nextn_all && inp_out_ids) {
++        // the in-loop trim was skipped to keep every token's h row; drop the
++        // non-output rows here instead, after the export above captured them all
++        cur = ggml_get_rows(ctx0, cur, inp_out_ids);
++    }
++
+     cb(cur, "result_norm", -1);
+     res->t_embd = cur;
+ 
+@@ -1390,17 +1730,49 @@ ggml_tensor * llama_model_qwen4exp::graph::build_conv_state_at(
      // keep the last state_cols columns for the next ubatch
      const size_t row_size = ggml_row_size(conv_states_all->type, row_total);
  
