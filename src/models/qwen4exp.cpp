@@ -806,8 +806,12 @@ public:
         res &= k_idxs->ne[0]    == params.ubatch.n_tokens;
         res &= cell_blk->ne[0]  == n_kv;
         res &= cell_blk->ne[1]  == n_stream;
-        res &= blk_cells->ne[0] == (int64_t) ratio*n_blocks;
-        res &= blk_pos->ne[0]   == 4*n_blocks*n_stream;
+        // [TAG_QSA_POOLED_CACHE] the pooled path drops blk_cells/blk_pos from the graph
+        // (the dirty tables replace them), so they may be null here
+        if (blk_cells != nullptr) {
+            res &= blk_cells->ne[0] == (int64_t) ratio*n_blocks;
+            res &= blk_pos->ne[0]   == 4*n_blocks*n_stream;
+        }
         res &= bias->ne[0]      == (blk_bias ? n_blocks : n_kv);
         res &= bias->ne[1]      == params.ubatch.n_tokens/n_stream;
 
