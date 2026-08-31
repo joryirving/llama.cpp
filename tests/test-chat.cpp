@@ -5963,6 +5963,37 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect(message_assist)
             .run();
 
+        // Recover a duplicated recipient prefix emitted by Muse in long chats.
+        tst.test(" to to=user<|message|>Hello, world!\nWhat's up?<|eot|>")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .expect(message_assist)
+            .run();
+
+        // The duplicated prefix can also occur after a valid reasoning block.
+        tst.test(" to=self<|message|>I am thinking<|eom|>"
+                 "<|start|>assistant to to=user<|message|>Hello!<|eot|>")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .expect_reasoning("I am thinking")
+            .expect_content("Hello!")
+            .run();
+
+        // Recover a reasoning block whose recipient/message header was omitted, while
+        // keeping the following correctly framed answer separate from hidden reasoning.
+        tst.test(" to customize the answer<|eom|>"
+                 "<|start|>assistant to=user<|message|>Hello!<|eot|>")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .expect_reasoning(" to customize the answer")
+            .expect_content("Hello!")
+            .run();
+
+        // Recover a malformed recipient-like reasoning prefix observed at 18k context.
+        tst.test(" to=user.\n\n<|eom|>"
+                 "<|start|>assistant to=user<|message|>Okay. You can keep it private.<|eot|>")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .expect_reasoning(" to=user.\n\n")
+            .expect_content("Okay. You can keep it private.")
+            .run();
+
         // "Inform then act": the model answers the user and calls a tool in ONE generation,
         // closing the answer with <|eom|>. The answer must stop there rather than swallow it.
         tst.test(" to=user<|message|>Hello, world!\nWhat's up?<|eom|>"

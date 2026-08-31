@@ -28,6 +28,36 @@
 #include "llama.h"
 #include "log.h"
 
+#ifdef LLAMA_BENCH_ROCTX
+#include <rocprofiler-sdk-roctx/roctx.h>
+
+struct scoped_roctx_range {
+    explicit scoped_roctx_range(const char * name) {
+        roctxRangePush(name);
+    }
+
+    ~scoped_roctx_range() {
+        roctxRangePop();
+    }
+};
+
+struct scoped_roctx_profile {
+    scoped_roctx_profile() {
+        roctxProfilerResume(0);
+    }
+
+    ~scoped_roctx_profile() {
+        roctxProfilerPause(0);
+    }
+};
+#else
+struct scoped_roctx_range {
+    explicit scoped_roctx_range(const char *) {}
+};
+
+struct scoped_roctx_profile {};
+#endif
+
 #ifdef _WIN32
 #    define WIN32_LEAN_AND_MEAN
 #    ifndef NOMINMAX
@@ -341,6 +371,10 @@ struct cmd_params {
     std::vector<int>                 n_cpu_moe;
     std::vector<llama_split_mode>    split_mode;
     std::vector<llama_load_mode>     load_mode;
+    // NSDMI, not just an entry in cmd_params_defaults: parse_cmd_params() starts from a
+    // fresh cmd_params and only restores the VECTOR fields from defaults when empty, so a
+    // scalar without an initialiser silently arrives as 0 (= OFF).
+    llama_tensor_read_lazy           tensor_read_lazy = LLAMA_TENSOR_READ_LAZY_AUTO;
     std::vector<int>                 main_gpu;
     std::vector<bool>                no_kv_offload;
     std::vector<llama_flash_attn_type> flash_attn;
@@ -385,6 +419,7 @@ static const cmd_params cmd_params_defaults = {
     /* n_cpu_moe            */ { 0 },
     /* split_mode           */ { LLAMA_SPLIT_MODE_LAYER },
     /* load_mode            */ { LLAMA_LOAD_MODE_AUTO },
+    /* tensor_read_lazy     */ LLAMA_TENSOR_READ_LAZY_AUTO,
     /* main_gpu             */ { 0 },
     /* no_kv_offload        */ { false },
     /* flash_attn           */ { LLAMA_FLASH_ATTN_TYPE_AUTO },
@@ -460,6 +495,7 @@ static void print_usage(int /* argc */, char ** argv) {
     printf("  -fa, --flash-attn <on|off|auto>                   (default: %s)\n", join(transform_to_str(cmd_params_defaults.flash_attn, llama_flash_attn_type_name), ",").c_str());
     printf("  -dev, --device <dev0/dev1/...>                    (default: auto)\n");
     printf("  -lm, --load-mode <auto|none|mmap|mlock|mmap+mlock|dio> (default: %s)\n", join(transform_to_str(cmd_params_defaults.load_mode, llama_load_mode_name), ",").c_str());
+    printf("  -trl, --tensor-read-lazy <on|auto|off>            (default: auto)\n");
     printf("  -mmp, --mmap <0|1>                                (DEPRECATED IN FAVOUR OF --load-mode)\n");
     printf("  -dio, --direct-io <0|1>                           (DEPRECATED IN FAVOUR OF --load-mode)\n");
     printf("  -embd, --embeddings <0|1>                         (default: %s)\n", join(cmd_params_defaults.embeddings, ",").c_str());
@@ -754,6 +790,13 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                     break;
                 }
                 params.split_mode.insert(params.split_mode.end(), modes.begin(), modes.end());
+            } else if (arg == "-trl" || arg == "--tensor-read-lazy") {
+                if (++i >= argc) { invalid_param = true; break; }
+                const std::string v = argv[i];
+                /**/ if (v == "on")   { params.tensor_read_lazy = LLAMA_TENSOR_READ_LAZY_ON;   }
+                else if (v == "auto") { params.tensor_read_lazy = LLAMA_TENSOR_READ_LAZY_AUTO; }
+                else if (v == "off")  { params.tensor_read_lazy = LLAMA_TENSOR_READ_LAZY_OFF;  }
+                else { invalid_param = true; break; }
             } else if (arg == "-lm" || arg == "--load-mode") {
                 if (++i >= argc) {
                     invalid_param = true;
@@ -1203,6 +1246,7 @@ struct cmd_params_instance {
     int                n_cpu_moe;
     llama_split_mode   split_mode;
     llama_load_mode    load_mode;
+    llama_tensor_read_lazy tensor_read_lazy;
     int                main_gpu;
     bool               no_kv_offload;
     llama_flash_attn_type flash_attn;
@@ -1224,6 +1268,7 @@ struct cmd_params_instance {
         }
         mparams.split_mode    = split_mode;
         mparams.load_mode     = load_mode;
+        mparams.tensor_read_lazy = tensor_read_lazy;
         mparams.main_gpu      = main_gpu;
         mparams.tensor_split  = tensor_split.data();
         mparams.no_host       = no_host;
@@ -1271,7 +1316,8 @@ struct cmd_params_instance {
         return model == other.model && n_gpu_layers == other.n_gpu_layers && n_cpu_moe == other.n_cpu_moe &&
                split_mode == other.split_mode &&
                main_gpu == other.main_gpu && tensor_split == other.tensor_split &&
-               load_mode == other.load_mode && devices == other.devices && no_host == other.no_host &&
+               load_mode == other.load_mode && tensor_read_lazy == other.tensor_read_lazy &&
+               devices == other.devices && no_host == other.no_host &&
                vec_tensor_buft_override_equal(tensor_buft_overrides, other.tensor_buft_overrides);
     }
 
@@ -1344,6 +1390,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .n_cpu_moe             = */ ncmoe,
                 /* .split_mode            = */ sm,
                 /* .load_mode             = */ lm,
+                /* .tensor_read_lazy      = */ params.tensor_read_lazy,
                 /* .main_gpu              = */ mg,
                 /* .no_kv_offload         = */ nkvo,
                 /* .flash_attn            = */ fa,
@@ -1380,6 +1427,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .n_cpu_moe             = */ ncmoe,
                 /* .split_mode            = */ sm,
                 /* .load_mode             = */ lm,
+                /* .tensor_read_lazy      = */ params.tensor_read_lazy,
                 /* .main_gpu              = */ mg,
                 /* .no_kv_offload         = */ nkvo,
                 /* .flash_attn            = */ fa,
@@ -1416,6 +1464,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .n_cpu_moe             = */ ncmoe,
                 /* .split_mode            = */ sm,
                 /* .load_mode             = */ lm,
+                /* .tensor_read_lazy      = */ params.tensor_read_lazy,
                 /* .main_gpu              = */ mg,
                 /* .no_kv_offload         = */ nkvo,
                 /* .flash_attn            = */ fa,
@@ -2303,7 +2352,10 @@ int llama_bench(int argc, char ** argv) {
                 llama_model_free(lmodel);
             }
 
-            lmodel = llama_model_load_from_file(inst.model.c_str(), mparams);
+            {
+                scoped_roctx_range range("llama-bench/model-load");
+                lmodel = llama_model_load_from_file(inst.model.c_str(), mparams);
+            }
             if (lmodel == NULL) {
                 fprintf(stderr, "%s: error: failed to load model '%s'\n", __func__, inst.model.c_str());
                 return 1;
@@ -2311,7 +2363,11 @@ int llama_bench(int argc, char ** argv) {
             prev_inst = &inst;
         }
 
-        llama_context * ctx = llama_init_from_model(lmodel, cparams);
+        llama_context * ctx;
+        {
+            scoped_roctx_range range("llama-bench/context-init");
+            ctx = llama_init_from_model(lmodel, cparams);
+        }
         if (ctx == NULL) {
             fprintf(stderr, "%s: error: failed to create context with model '%s'\n", __func__, inst.model.c_str());
             llama_model_free(lmodel);
@@ -2355,6 +2411,7 @@ int llama_bench(int argc, char ** argv) {
                     fprintf(stderr, "llama-bench: benchmark %d/%zu: warmup prompt run\n", params_idx, params_count);
                 }
                 //test_prompt(ctx, std::min(t.n_batch, std::min(t.n_prompt, 32)), 0, t.n_batch, t.n_threads);
+                scoped_roctx_range range("llama-bench/warmup-prompt");
                 bool res = test_prompt(ctx, t.n_prompt, t.n_batch, t.n_threads);
                 if (!res) {
                     fprintf(stderr, "%s: error: failed to run prompt warmup\n", __func__);
@@ -2367,6 +2424,7 @@ int llama_bench(int argc, char ** argv) {
                 if (params.progress) {
                     fprintf(stderr, "llama-bench: benchmark %d/%zu: warmup generation run\n", params_idx, params_count);
                 }
+                scoped_roctx_range range("llama-bench/warmup-generation");
                 bool res = test_gen(ctx, 1, t.n_threads);
                 if (!res) {
                     fprintf(stderr, "%s: error: failed to run gen warmup\n", __func__);
@@ -2385,6 +2443,7 @@ int llama_bench(int argc, char ** argv) {
 
                 if (is_cached) {
                     // if previously we have computed at this depth, just restore the state
+                    scoped_roctx_range range("llama-bench/depth-restore");
                     const size_t ret = llama_state_seq_set_data(ctx, cstate.buf.data(), cstate.buf.size(), 0);
                     if (ret == 0) {
                         // if the old state is incompatible with the current context - reprocess from scratch
@@ -2397,6 +2456,7 @@ int llama_bench(int argc, char ** argv) {
                         fprintf(stderr, "llama-bench: benchmark %d/%zu: depth run %d/%d\n", params_idx, params_count,
                                 i + 1, params.reps);
                     }
+                    scoped_roctx_range range("llama-bench/depth-compute");
                     bool res = test_prompt(ctx, t.n_depth, t.n_batch, t.n_threads);
                     if (!res) {
                         fprintf(stderr, "%s: error: failed to run depth\n", __func__);
@@ -2424,6 +2484,8 @@ int llama_bench(int argc, char ** argv) {
                     fprintf(stderr, "llama-bench: benchmark %d/%zu: prompt run %d/%d\n", params_idx, params_count,
                             i + 1, params.reps);
                 }
+                scoped_roctx_profile profile;
+                scoped_roctx_range range("llama-bench/prompt");
                 bool res = test_prompt(ctx, t.n_prompt, t.n_batch, t.n_threads);
                 if (!res) {
                     fprintf(stderr, "%s: error: failed to run prompt\n", __func__);
@@ -2437,6 +2499,7 @@ int llama_bench(int argc, char ** argv) {
                     fprintf(stderr, "llama-bench: benchmark %d/%zu: generation run %d/%d\n", params_idx, params_count,
                             i + 1, params.reps);
                 }
+                scoped_roctx_range range("llama-bench/generation");
                 bool res = test_gen(ctx, t.n_gen, t.n_threads);
                 if (!res) {
                     fprintf(stderr, "%s: error: failed to run gen\n", __func__);

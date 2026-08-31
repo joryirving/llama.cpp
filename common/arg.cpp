@@ -2681,6 +2681,19 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_LOAD_MODE"));
     add_opt(common_arg(
+        {"--tensor-read-lazy"}, "MODE",
+        "on-demand reading of certain tensors, for example per-layer embeddings (default: auto)\n"
+        "- on: read the rows of such tensors from disk on demand instead of keeping them resident (requires mmap)\n"
+        "- auto: on, but only for tensors larger than 4 GiB\n"
+        "- off: always keep them resident",
+        [](common_params & params, const std::string & value) {
+            /**/ if (value == "on")   { params.tensor_read_lazy = LLAMA_TENSOR_READ_LAZY_ON;   }
+            else if (value == "auto") { params.tensor_read_lazy = LLAMA_TENSOR_READ_LAZY_AUTO; }
+            else if (value == "off")  { params.tensor_read_lazy = LLAMA_TENSOR_READ_LAZY_OFF;  }
+            else { throw std::invalid_argument("invalid value"); }
+        }
+    ).set_env("LLAMA_ARG_TENSOR_READ_LAZY"));
+    add_opt(common_arg(
         {"--numa"}, "TYPE",
         "attempt optimizations that help on some NUMA systems\n"
         "- distribute: spread execution evenly over all nodes\n"
@@ -4083,6 +4096,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.speculative.draft.n_max = value;
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_MAX"));
+    add_opt(common_arg(
+        {"--spec-draft-adaptive"},
+        string_format("size each draft from measured acceptance rather than always drafting --spec-draft-n-max (default: %s)", params.speculative.draft.adaptive ? "true" : "false"),
+        [](common_params & params) {
+            params.speculative.draft.adaptive = true;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_ADAPTIVE"));
     add_opt(common_arg(
         {"--spec-draft-n-min"}, "N",
         string_format("minimum number of draft tokens to use for speculative decoding (default: %d)", params.speculative.draft.n_min),

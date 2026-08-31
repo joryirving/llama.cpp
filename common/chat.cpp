@@ -3369,14 +3369,32 @@ static common_chat_params common_chat_params_init_muse_glimmer(const common_chat
             return start + p.content(p.rest());
         }
 
+        // Keep every valid structured recipient header on the strict path. Recovery is
+        // reserved for text that reaches <|eom|> without a valid message header.
+        auto structured_header = p.choice({
+            p.literal("<|message|>"),
+            p.literal(" to to=user<|message|>"),
+            p.literal(" to=") + p.until_one_of({ "<|message|>", "<|eom|>" }) + p.literal("<|message|>"),
+        });
+        auto recovery_guard = p.negate(structured_header);
+
         if (extract_reasoning) {
             p.rule("analysis", p.literal(" to=self<|message|>") + p.reasoning(p.until("<|eom|>")) + p.literal("<|eom|>"));
+            // Muse occasionally omits the recipient/message header for a reasoning block,
+            // especially in longer conversations. Preserve that block as reasoning instead
+            // of rejecting the complete response after it emits a valid final message.
+            p.rule("analysis-recovery",
+                   recovery_guard + p.reasoning(p.until("<|eom|>")) + p.literal("<|eom|>"));
         } else {
             p.rule("analysis", p.literal(" to=self<|message|>") + p.content(p.until("<|eom|>")) + p.literal("<|eom|>"));
+            p.rule("analysis-recovery",
+                   recovery_guard + p.content(p.until("<|eom|>")) + p.literal("<|eom|>"));
         }
-        auto analysis = p.ref("analysis");
+        auto analysis = p.choice({ p.ref("analysis"), p.ref("analysis-recovery") });
 
-        auto recipient  = p.optional(p.literal(" to=user"));
+        // Recover the unambiguous duplicated "to" prefix observed from Muse without
+        // relaxing tool recipient parsing or any other chat format.
+        auto recipient  = p.optional(p.choice({ p.literal(" to=user"), p.literal(" to to=user") }));
         auto final_msg  = p.rule("final", recipient + p.literal("<|message|>") +
                                               p.content(p.until_one_of({ "<|eot|>", "<|eom|>" })));
 
@@ -3729,6 +3747,8 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
             auto end_tag = trim_whitespace(autoparser.reasoning.end);
             if (!end_tag.empty()) {
                 auto_params.thinking_end_tags = {std::move(end_tag)};
+                auto_params.thinking_end_tags.insert(auto_params.thinking_end_tags.end(),
+                    autoparser.reasoning.extra_ends.begin(), autoparser.reasoning.extra_ends.end());
             }
         }
         common_peg_arena arena;

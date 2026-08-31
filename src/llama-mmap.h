@@ -2,7 +2,9 @@
 
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <vector>
+#include <utility>
 #include <cstdio>
 
 struct llama_file;
@@ -41,8 +43,12 @@ private:
 };
 
 struct llama_mmap {
+    // list of [first, last) byte ranges within a file
+    using ranges = std::vector<std::pair<size_t, size_t>>;
+
     llama_mmap(const llama_mmap &) = delete;
-    llama_mmap(struct llama_file * file, size_t prefetch = (size_t) -1, bool numa = false);
+    llama_mmap(struct llama_file * file, size_t prefetch = (size_t) -1, bool numa = false,
+               const ranges & lazy_ranges = {});
     ~llama_mmap();
 
     size_t size() const;
@@ -50,12 +56,21 @@ struct llama_mmap {
 
     void unmap_fragment(size_t first, size_t last);
 
+    // true if [ptr, ptr + len) lies inside this mapping
+    bool contains(const void * ptr, size_t len) const;
+
+    // ask the kernel to start reading the given rows. issued as one batch so the faults overlap
+    // instead of serializing.
+    void prefetch_rows(const void * base, size_t stride, size_t row_size,
+                       const int32_t * rows, size_t n_rows) const;
+
     static const bool SUPPORTED;
 
 private:
     struct impl;
     std::unique_ptr<impl> pimpl;
 };
+
 
 struct llama_mlock {
     llama_mlock();

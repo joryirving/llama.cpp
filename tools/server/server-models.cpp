@@ -2360,7 +2360,14 @@ server_http_proxy::server_http_proxy(
     cli->set_write_timeout(timeout_read, 0); // reversed for cli (client) vs srv (server)
     cli->set_read_timeout(timeout_write, 0);
     this->status = 500; // to be overwritten upon response
-    this->cleanup_pipes = [pipe]() {
+    this->cleanup_pipes = [pipe, cli]() {
+        // If the downstream client disappears before a non-streaming child
+        // response has produced headers, the proxy thread is still blocked in
+        // ClientImpl::send(). Closing only the in-process pipe leaves that
+        // HTTP request alive, so the child continues generating. Stopping the
+        // client shuts down its socket and propagates the disconnect to the
+        // child server, whose existing should_stop path cancels the task.
+        cli->stop();
         pipe->close_read();
         pipe->close_write();
     };
@@ -2414,6 +2421,21 @@ server_http_proxy::server_http_proxy(
     std::string override_content_type;
     bool has_files = !files.empty();
 
+    // Ordinary generation requests have no resumable conversation id. Give
+    // them a private one on the child hop so the router can explicitly cancel
+    // the child task if its own downstream client disconnects. User-supplied
+    // conversation ids retain their resumable semantics and are never touched.
+    std::map<std::string, std::string> effective_headers = headers;
+    std::string internal_conv_id;
+    const bool is_generation_post = method == "POST" &&
+            (path == "/completion" || path == "/v1/completions" || path == "/v1/chat/completions");
+    if (is_generation_post && server_stream_conv_id_from_headers(headers).empty()) {
+        static std::atomic<uint64_t> internal_conv_seq{0};
+        internal_conv_id = "__router_cancel_" + std::to_string(ggml_time_us()) + "_" +
+                std::to_string(internal_conv_seq.fetch_add(1, std::memory_order_relaxed));
+        effective_headers["X-Conversation-Id"] = internal_conv_id;
+    }
+
     if (has_files) {
         json form_fields = json::parse(body, nullptr, false);
         if (!form_fields.is_discarded()) {
@@ -2430,7 +2452,7 @@ server_http_proxy::server_http_proxy(
     {
         req.method = method;
         req.path = path;
-        for (const auto & [key, value] : headers) {
+        for (const auto & [key, value] : effective_headers) {
             const auto lowered = to_lower_copy(key);
             if (lowered == "accept-encoding") {
                 // disable Accept-Encoding to avoid compressed responses
@@ -2472,10 +2494,43 @@ server_http_proxy::server_http_proxy(
         req.content_receiver = content_receiver;
     }
 
+    auto request_finished = std::make_shared<std::atomic<bool>>(false);
+    auto cancel_child_session = [host, port, internal_conv_id]() {
+        if (internal_conv_id.empty()) {
+            return;
+        }
+        httplib::Client cancel_cli(host, port);
+        cancel_cli.set_connection_timeout(1, 0);
+        cancel_cli.set_read_timeout(1, 0);
+        cancel_cli.set_write_timeout(1, 0);
+        const std::string cancel_path = "/v1/stream?conv_id=" + encode_qs(internal_conv_id);
+        auto result = cancel_cli.Delete(cancel_path);
+        if (!result || result->status != 204) {
+            SRV_WRN("failed to cancel internal child session %s\n", internal_conv_id.c_str());
+        }
+    };
+
+    if (!internal_conv_id.empty() && should_stop) {
+        std::thread([cli, should_stop, request_finished, cancel_child_session, internal_conv_id]() {
+            while (!request_finished->load(std::memory_order_acquire)) {
+                if (should_stop()) {
+                    SRV_INF("downstream disconnected, cancelling child session %s\n", internal_conv_id.c_str());
+                    cli->stop();
+                    cancel_child_session();
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }).detach();
+    }
+
     // start the proxy thread
     SRV_DBG("start proxy thread %s %s\n", req.method.c_str(), req.path.c_str());
-    this->thread = std::thread([cli, pipe, req, headers_sent, make_header_msg]() {
+    this->thread = std::thread([cli, pipe, req, headers_sent, make_header_msg,
+                                request_finished, cancel_child_session]() {
         auto result = cli->send(std::move(req));
+        request_finished->store(true, std::memory_order_release);
+        cancel_child_session();
         if (result.error() != httplib::Error::Success) {
             auto err_str = httplib::to_string(result.error());
             SRV_ERR("http client error: %s\n", err_str.c_str());
