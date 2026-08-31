@@ -1,4 +1,4 @@
-name: Strix Halo build
+name: Strix Halo build (disabled provenance copy)
 
 # Auto-builds gfx1151 binaries on every push/merge to strix-halo-vulkan (artifacts, 30 days),
 # and publishes a GitHub Release when a strix-v* tag is pushed (or via workflow_dispatch).

@@ -1,5 +1,12 @@
 # llama.cpp
 
+> [!IMPORTANT]
+> This branch is a tested Strix Halo production snapshot, not an upstream
+> llama.cpp release. Start with [PRODUCTION-SNAPSHOT.md](PRODUCTION-SNAPSHOT.md),
+> [PATCHSET.md](PATCHSET.md), and
+> [QWEN38-FLASH-NEXT-MTP.md](QWEN38-FLASH-NEXT-MTP.md). The `master` branch of
+> this fork continues to track the official upstream repository.
+
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
 
 <div align="center">
