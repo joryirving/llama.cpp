@@ -1,0 +1,71 @@
+From 6f47fce813b51bc1b28f2e839ede6c366d8befbd Mon Sep 17 00:00:00 2001
+From: Joakim Hansson <joakim.hansson87@gmail.com>
+Date: Fri, 28 Aug 2026 09:50:51 +0000
+Subject: [PATCH 04/10] vulkan: radix top-k selection for large k
+
+The shared-memory TOP_K shaders cap k at 1024; the QSA indexer needs
+k=2051, which previously fell back to the CPU and was worked around
+model-side with a full descending ARGSORT (O(n log^2 n) multi-pass at
+depth, 12x per token in decode and 12x per 2048-row prefill chunk).
+
+New topk_radix.comp: iterative 8-bit radix selection on the
+order-preserving unsigned key transform, one workgroup per row, single
+dispatch, no temporary buffers, exact k with tie handling, indices
+unordered per the ggml_top_k contract. Ported to Vulkan from the HIP
+kernel in EngramHalo.cpp (Aristo94). Routed for k beyond the pipeline
+table; supports_op lifted accordingly.
+
+qwen4exp drops the argsort workaround and calls ggml_top_k directly;
+the gather path pads the unordered selection to the flash attention
+granularity by repeating the first index (pad rows are re-masked).
+
+test-backend-ops TOP_K passes incl. k=9999 over 524k columns with ties.
+Strix Halo (RADV), greedy output char-identical: prefill 313/259/184 ->
+368/315/219 t/s at 16k/32k/64k (with -ub 2048), decode +2-3% at depth.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AUwCGmqs39JdaEFjBmtvDa
+---
+ src/models/qwen4exp.cpp | 26 ++++++++++++--------------
+ 1 file changed, 12 insertions(+), 14 deletions(-)
+
+diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
+index e119a9617..4f4906654 100644
+--- a/src/models/qwen4exp.cpp
++++ b/src/models/qwen4exp.cpp
+@@ -684,20 +684,18 @@ ggml_tensor * llama_model_qwen4exp::graph::build_qsa_top_k(
+     // again, so the visible set stays `width`
+     const int64_t n_sel = std::max<int64_t>(width, qsa_gather_n_sel(n_kv, width));
+ 
+-    // the Vulkan backend only runs GGML_OP_TOP_K on the GPU for rows up to 1024 elements;
+-    // beyond that the op falls back to the CPU, which costs a growing GPU<->CPU round trip
+-    // per QSA layer per decode step and is the dominant context-depth slowdown (measured:
+-    // decode drops from 23.5 t/s to 17.4 t/s right as n_kv crosses 1024). full ARGSORT is
+-    // supported at any size, so select through it instead: the first `n_sel` indices of a
+-    // descending argsort are exactly the top-k (tie order may differ, which only permutes
+-    // the selection among equal scores).
+-    ggml_tensor * top_k;
+-    if (n_kv > 1024) {
+-        ggml_tensor * order = ggml_argsort(ctx0, expanded, GGML_SORT_ORDER_DESC);
+-        top_k = ggml_cont(ctx0, ggml_view_3d(ctx0, order, n_sel, order->ne[1], order->ne[2],
+-                order->nb[1], order->nb[2], 0));
+-    } else {
+-        top_k = ggml_cont(ctx0, ggml_top_k(ctx0, expanded, n_sel));
++    // ggml_top_k (radix selection on the Vulkan backend for large k) returns the top
++    // `width` indices in no particular order — every consumer treats the selection as a
++    // set. When the gather path runs, the row count must be padded to n_sel for the flash
++    // attention granularity: repeat the first index; the pad entries are re-masked to
++    // -inf in build_attn_qsa_gather, so duplicates are never visible.
++    ggml_tensor * top_k = ggml_cont(ctx0, ggml_top_k(ctx0, expanded, width));
++
++    if (n_sel > width) {
++        ggml_tensor * first = ggml_view_3d(ctx0, top_k, 1, top_k->ne[1], top_k->ne[2],
++                top_k->nb[1], top_k->nb[2], 0);
++        ggml_tensor * pad = ggml_repeat_4d(ctx0, first, n_sel - width, top_k->ne[1], top_k->ne[2], 1);
++        top_k = ggml_concat(ctx0, top_k, pad, 0);
+     }
+ 
+     // build_attn_qsa reads [n_top_k, n_batch, 1, n_stream], matching the KQ mask.
+-- 
+2.50.1 (Apple Git-155)
+
