@@ -1866,15 +1866,32 @@ void llama_kv_cache::get_prev_tokens(const llama_ubatch & ubatch, uint32_t n, st
 
     for (uint32_t s = 0; s < n_stream; ++s) {
         // p_max inclusive: an embd token looks up cells at its own (shared) position
-        v_cells[s].for_each_token_in(seqs, 0, p_max + 1,
+        v_cells[s].for_each_token_in(seqs, w0, p_max + 1,
             [&](llama_seq_id seq_id, llama_pos pos, llama_token tok) {
-                if (pos >= w0) {
-                    hist[key(seq_id, pos)] = tok;
-                } else if (pos > below[seq_id].first) {
-                    below[seq_id] = { pos, tok };
-                }
+                hist[key(seq_id, pos)] = tok;
             });
     }
+
+    // below[] only answers when an M-RoPE gap leaves the window empty, so it costs a pass of
+    // its own that contiguous positions never pay
+    bool below_ready = false;
+
+    const auto ensure_below = [&]() {
+        if (below_ready) {
+            return;
+        }
+
+        below_ready = true;
+
+        for (uint32_t s = 0; s < n_stream; ++s) {
+            v_cells[s].for_each_token_in(seqs, 0, w0,
+                [&](llama_seq_id seq_id, llama_pos pos, llama_token tok) {
+                    if (pos > below[seq_id].first) {
+                        below[seq_id] = { pos, tok };
+                    }
+                });
+        }
+    };
 
     // the token at pos p, or the nearest earlier one when p falls in an M-RoPE gap
     const auto lookup = [&](llama_seq_id seq_id, llama_pos p) -> llama_token {
@@ -1884,6 +1901,7 @@ void llama_kv_cache::get_prev_tokens(const llama_ubatch & ubatch, uint32_t n, st
                 return it->second;
             }
         }
+        ensure_below();
         return below[seq_id].second;
     };
 
@@ -2385,6 +2403,12 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
 
         ubatch.seq_id_unq[0] = dest_seq_id;
 
+        // the ext as it was saved, to put back after apply_ubatch()
+        std::vector<llama_kv_cell_ext> exts;
+        if (has_cell_ext()) {
+            exts.resize(cell_count);
+        }
+
         for (uint32_t i = 0; i < cell_count; ++i) {
             llama_pos pos;
             uint32_t n_seq_id;
@@ -2408,6 +2432,8 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
 
                 // apply_ubatch() below restores ext.tok from the ubatch tokens
                 ubatch.token[i] = ext.tok;
+
+                exts[i] = ext;
             }
 
             // read the sequence id, but directly discard it - we will use dest_seq_id instead
@@ -2460,6 +2486,14 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
         //       only ext.tok and the M-RoPE 2D position round-trip through it
         //       see: https://github.com/ggml-org/llama.cpp/pull/16825#issuecomment-3460868350
         apply_ubatch(sinfo, ubatch);
+
+        // apply_ubatch() takes the 2D position from the ubatch, and that ubatch is built with this
+        // cache's own n_pos_per_embd. a cache that does not use M-RoPE itself but mirrors one that
+        // does (the qwen4exp QSA indexer) would drop x and y. put the saved ext back instead, which
+        // is what the whole-context path below already does.
+        for (uint32_t i = 0; i < (uint32_t) exts.size(); ++i) {
+            cells.ext_set(sinfo.idxs[0][i], exts[i]);
+        }
 
         LLAMA_LOG_DEBUG("%s: cell_count = %d, dest_seq_id = %d\n", __func__, cell_count, dest_seq_id);
 
