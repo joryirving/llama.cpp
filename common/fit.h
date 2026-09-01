@@ -19,6 +19,12 @@ struct common_fit_extra_model {
     llama_model_params * mparams;
     llama_context_params * cparams;
     bool shares_model;
+
+    // A compact external MTP head can omit token_embd, output_norm and output
+    // and borrow them from the target. The memory probe uses no_alloc models,
+    // so a metadata-only target is sufficient to resolve and validate them.
+    const char * path_model_shared;
+    llama_model_params * mparams_shared;
 };
 
 // fits mparams and cparams to free device memory (assumes system memory is unlimited)

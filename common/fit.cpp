@@ -8,6 +8,7 @@
 #include <cassert>
 #include <stdexcept>
 #include <cinttypes>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -218,7 +219,38 @@ static void common_params_fit_impl(
                 __func__, cparams->n_ctx);
 
             dmds_t measured;
+
+            // A shared MTP sidecar is not a standalone model. Give its no_alloc
+            // measurement a no_alloc target so the omitted shared tensors can
+            // be resolved without allocating the target weights twice.
+            using model_ptr = std::unique_ptr<llama_model, decltype(&llama_model_free)>;
+            model_ptr model_shared(nullptr, llama_model_free);
+            const llama_model * model_shared_prev = extra->mparams->model_shared;
+
+            struct model_shared_reset {
+                llama_model_params * mparams;
+                const llama_model * previous;
+
+                ~model_shared_reset() {
+                    mparams->model_shared = previous;
+                }
+            } reset_shared { extra->mparams, model_shared_prev };
+
             try {
+                if (extra->path_model_shared != nullptr && extra->mparams_shared != nullptr) {
+                    llama_model_params mparams_shared = *extra->mparams_shared;
+                    mparams_shared.no_alloc    = true;
+                    mparams_shared.load_mode  = LLAMA_LOAD_MODE_NONE;
+                    mparams_shared.model_shared = nullptr;
+
+                    model_shared.reset(llama_model_load_from_file(extra->path_model_shared, mparams_shared));
+                    if (model_shared == nullptr) {
+                        throw std::runtime_error("failed to load shared target metadata");
+                    }
+
+                    extra->mparams->model_shared = model_shared.get();
+                }
+
                 measured = common_get_device_memory_data_impl(
                     extra->path_model, extra->mparams, extra->cparams, devs_extra, ngl_extra, nct_extra, nex_extra, log_level);
             } catch (const std::runtime_error & e) {

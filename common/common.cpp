@@ -1310,10 +1310,12 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
         cparams_dft.n_rs_seq = 0;
 
         const common_fit_extra_model extra = {
-            /*.path_model   =*/ params_dft.model.path.c_str(),
-            /*.mparams      =*/ &mparams_dft,
-            /*.cparams      =*/ &cparams_dft,
-            /*.shares_model =*/ !has_draft, // an MTP context runs on the weights of the main model
+            /*.path_model        =*/ params_dft.model.path.c_str(),
+            /*.mparams           =*/ &mparams_dft,
+            /*.cparams           =*/ &cparams_dft,
+            /*.shares_model      =*/ !has_draft, // an integrated MTP context runs on the weights of the main model
+            /*.path_model_shared =*/ has_draft && spec_mtp ? params.model.path.c_str() : nullptr,
+            /*.mparams_shared    =*/ has_draft && spec_mtp ? &mparams : nullptr,
         };
 
         common_fit_params(params.model.path.c_str(), &mparams, &cparams,
