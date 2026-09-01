@@ -7,16 +7,18 @@ separate draft sidecar.
 
 ## Important GGUF distinction
 
-The Qwen3.8 Flash Next architecture has a trained MTP layer. At the time of this
-snapshot, the normal quantized files published in
+The Qwen3.8 Flash Next architecture has a trained MTP layer. The normal
+three-shard target GGUFs published in
 [`unsloth/Qwen3.8-Flash-Next-GGUF`](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF)
-do not include the MTP tensors. Starting one of those files with
-`--spec-type draft-mtp` alone therefore reports that the model does not contain
-MTP layers. The same behavior is tracked in
-[the repository discussion](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/discussions/47).
+do not carry an integrated MTP block. Unsloth now publishes that block as a
+separate shared sidecar in the repository's
+[`MTP` directory](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/main/MTP).
+Starting a normal target file with `--spec-type draft-mtp` alone still lacks a
+draft. Pair it with the official sidecar via `--spec-draft-model`.
 
 This is a packaging distinction, not an incompatibility between the MTP code
-and the official model weights.
+and the official model weights. Build 10685 was production-gated with the
+normal Unsloth UD-IQ4_XS target and the official shared Q8_0 MTP sidecar.
 
 An integrated Qwen3.8 Flash Next MTP GGUF is expected to expose at least:
 
@@ -51,7 +53,8 @@ Hyper-Connection tensors. Checking only the metadata key is not sufficient.
 ```bash
 ./build-vulkan/bin/llama-server \
   --model /models/Qwen3.8-Flash-Next-00001-of-00003.gguf \
-  --spec-draft-model /models/mtp-Qwen3.8-Flash-Next-Q8_0.gguf \
+  --spec-draft-model /models/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf \
+  --n-gpu-layers-draft 999 \
   --spec-type draft-mtp \
   --spec-draft-adaptive \
   --spec-draft-n-min 0 \
@@ -64,6 +67,12 @@ Hyper-Connection tensors. Checking only the metadata key is not sufficient.
 These examples show the MTP-specific flags, not a complete production command.
 Context, batch sizes, KV types, tensor loading mode, parallel slots, and
 sampling should be selected for the target hardware and workload.
+
+The exact sidecar used for the production gate was
+`mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`, 2,786,568,256 bytes, with SHA-256
+`5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6`.
+Verify the current publisher artifact rather than assuming this hash applies to
+a later revision.
 
 The best maximum draft depth is workload-dependent. On the reference system,
 the official-model preset used adaptive depth 0 through 4, while a separately

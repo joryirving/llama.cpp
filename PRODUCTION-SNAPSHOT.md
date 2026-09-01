@@ -9,21 +9,23 @@ upstream llama.cpp release.
 
 | Item | Value |
 | --- | --- |
-| Public branch | `production/strix-halo-qwen4exp-b10669` |
-| Original production source commit | `3287a6e9dfb412201b25f201733620044ada2c12` |
-| Original production source tree | `fff0302a9f70ae9073588dd914db08cc578f256c` |
-| Clean snapshot commit | `77ee2ed748a047e2222ca885944631c7d7e7c7ee` |
-| Clean publication parent | upstream `9f0d017efb4a388bd5c60a27a575c90f20868e51` |
-| Self-reported build | `10669`, commit `3287a6e9d` |
-| Production `llama-server` SHA-256 | `c3adcbee091d04aa83370129a669dbfab04c9b7f97ccc70b4974853d4b3b5e52` |
+| Public branch | `production/strix-halo-qwen4exp-b10685` |
+| Original production source commit | `bbc7d5666014a4e4ac5a28adb56bc8c49da0555c` |
+| Original production source tree | `6c6339780f0647f80d32afdc524bec32f7f8dc2e` |
+| Clean snapshot commit | `38afc1983713f9bc6677aafba76f9aa16edda8e0` |
+| Previous clean snapshot | `77ee2ed748a047e2222ca885944631c7d7e7c7ee` |
+| Self-reported build | `10685`, commit `bbc7d56660` |
+| Production `llama-server` SHA-256 | `55143222ec45b3a9c9e43f9a980cd7b57ddc971970043576cd517f76d39cb2e7` |
 | Backend | Vulkan with system RADV |
 
 The clean snapshot commit has exactly the same Git tree as the original
-production source commit. The later commit on this branch adds documentation
-and disables an inherited release workflow. It does not change compiled source.
+production source commit. Its parent is the previous published production
+snapshot, so the source delta remains reviewable without rewriting the older
+branch. The later commit on this branch adds documentation and keeps an
+inherited release workflow disabled. It does not change compiled source.
 
 A binary built from the public branch will report the public commit and its own
-derived build number, not `3287a6e9d` and `10669`. Those values identify the
+derived build number, not `bbc7d56660` and `10685`. Those values identify the
 already deployed binary. The compiled inference code remains identical at the
 clean snapshot commit.
 
@@ -84,10 +86,12 @@ commit. Source-tree identity is therefore the primary portable identity.
 ## Scope and support
 
 The production workload that motivated this snapshot is Qwen3.8 Flash Next on
-Strix Halo, including QSA, PLE, integrated NextN/MTP, adaptive speculation, and
-selected Vulkan optimizations. The tree also contains other model and backend
-work inherited from its source line. Those paths are not all production-tested
-by this repository owner.
+Strix Halo, including QSA, PLE, integrated and external NextN/MTP, adaptive
+speculation, shared target/draft weights, and selected Vulkan optimizations.
+The production gate covered both an integrated-head uncensored GGUF and the
+official Unsloth model with its shared Q8_0 MTP sidecar. The tree also contains
+other model and backend work inherited from its source line. Those paths are
+not all production-tested by this repository owner.
 
 Models, MTP sidecars, multimodal projectors, presets, benchmark prompts, and
 host configuration are deliberately not included. Model licenses and file

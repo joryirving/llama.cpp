@@ -10,7 +10,7 @@ development lines and a small number of local integration fixes.
   project and license base.
 - [Nathanw1014/llama.cpp](https://github.com/Nathanw1014/llama.cpp) and the
   [Strix Halo toolbox](https://github.com/Nathanw1014/strix-halo-llamacpp), for
-  the Strix Halo Vulkan line and the v0.7.2 optimization work.
+  the Strix Halo Vulkan line and the v0.7.3 optimization work.
 - [apepojken/llama.cpp](https://github.com/apepojken/llama.cpp), for selected
   Qwen3.8 Flash Next execution-path optimizations.
 - [unslothai/llama.cpp](https://github.com/unslothai/llama.cpp), used while
@@ -45,12 +45,22 @@ The production source contains the following material groups:
 8. Additional inherited support for DeepSeek V4 sparse attention, DFlash2,
    Muse Glimmer, BailingMoE3, Motif-3, and ROCm. Presence in the source tree is
    not a claim that every path was validated in the reference production setup.
+9. The b10685 refresh adds Vulkan graph alias-dependency correctness from
+   [PR 27812](https://github.com/ggml-org/llama.cpp/pull/27812), extends the
+   gathered flash-attention path to GQA QSA caches, and incorporates recurrent
+   state, KV rollback, and n-gram cache fixes from the current Strix Halo line.
+10. Shared target/draft weights and draft-only Qwen3.8 Flash Next MTP exports
+    follow the work in
+    [upstream PR 27941](https://github.com/ggml-org/llama.cpp/pull/27941) and
+    [Unsloth PR 144](https://github.com/unslothai/llama.cpp/pull/144). This is
+    what allows the official small shared MTP sidecar to run beside the normal
+    three-shard target model without duplicating its embedding and output head.
 
-The source lineage between the clean publication parent and the original
-production commit contains 205 commits, including merges and reversions. The
-single clean snapshot commit is therefore the authoritative public artifact.
-It should not be described as current upstream plus only a handful of literal
-Git commits.
+The source lineage behind this and the preceding production snapshot contains
+upstream merges, cherry-picks, experiments, reversions, and local integration
+fixes. The clean snapshot commits are therefore the authoritative public
+artifacts. The branch should not be described as current upstream plus only a
+handful of literal Git commits.
 
 ## Deliberate boundaries
 
@@ -64,3 +74,14 @@ Git commits.
 
 When upstream equivalents become available, prefer them over carrying the
 corresponding local patch.
+
+## Known upstream delta at publication
+
+After this binary was built and tested, PR 27941 added commit `c961cd319d`.
+That commit marks tensor split mode as unsupported for Qwen4exp, so llama.cpp
+rejects `-sm tensor` instead of advertising a path that is not implemented for
+this architecture. The b10685 snapshot does not include that guard. The
+documented production deployment uses one Vulkan device and does not pass
+`-sm tensor`, so the delta does not affect its output or performance. Anyone
+building this branch for multiple GPUs should avoid tensor split mode for
+Qwen4exp or carry the upstream guard.
