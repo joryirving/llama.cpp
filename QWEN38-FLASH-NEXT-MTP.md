@@ -68,6 +68,21 @@ These examples show the MTP-specific flags, not a complete production command.
 Context, batch sizes, KV types, tensor loading mode, parallel slots, and
 sampling should be selected for the target hardware and workload.
 
+## Shared sidecars and auto-fit
+
+The original b10685 server could load the compact shared sidecar together with
+its target, but its auto-fit preflight first tried to measure the sidecar as a
+standalone model. Because the compact sidecar intentionally omits
+`token_embd.weight`, that preflight logged a missing-tensor warning and fitted
+the target without accounting for the draft model. `--fit off` avoided the
+probe but also disabled automatic memory fitting.
+
+The current tip measures the target and external draft together. For a shared
+MTP sidecar, the no-allocation measurement receives target metadata so it can
+resolve omitted tensors without allocating or counting the target weights a
+second time. The path was tested with explicit `--fit on`, the official shared
+Q8_0 sidecar, and the Unsloth UD-IQ4_XS target.
+
 The exact sidecar used for the production gate was
 `mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`, 2,786,568,256 bytes, with SHA-256
 `5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6`.

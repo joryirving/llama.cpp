@@ -55,6 +55,12 @@ The production source contains the following material groups:
     [Unsloth PR 144](https://github.com/unslothai/llama.cpp/pull/144). This is
     what allows the official small shared MTP sidecar to run beside the normal
     three-shard target model without duplicating its embedding and output head.
+11. The follow-up shared-MTP fit change includes upstream joint target/draft
+    memory accounting from commit `2fb989b9e7` and a local integration fix for
+    compact sidecars. During the no-allocation fit probe, the sidecar receives
+    a metadata-only view of its target so omitted shared tensors can be resolved
+    without allocating or counting the target weights twice. This removes the
+    standalone fit-probe failure for `token_embd.weight` and permits `--fit on`.
 
 The source lineage behind this and the preceding production snapshot contains
 upstream merges, cherry-picks, experiments, reversions, and local integration

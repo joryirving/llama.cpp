@@ -16,6 +16,9 @@ upstream llama.cpp release.
 | Previous clean snapshot | `77ee2ed748a047e2222ca885944631c7d7e7c7ee` |
 | Self-reported build | `10685`, commit `bbc7d56660` |
 | Production `llama-server` SHA-256 | `55143222ec45b3a9c9e43f9a980cd7b57ddc971970043576cd517f76d39cb2e7` |
+| Shared-MTP fit source commit | `10bb3cff8` |
+| Tested fit candidate | build `10687`, commit `2f87ad34c7` |
+| Tested fit candidate `llama-server` SHA-256 | `edc54ed7710b7eaa851830c308907e8a4c9dd5566ebc136c88abd8bc6ff9d881` |
 | Backend | Vulkan with system RADV |
 
 The clean snapshot commit has exactly the same Git tree as the original
@@ -26,8 +29,17 @@ inherited release workflow disabled. It does not change compiled source.
 
 A binary built from the public branch will report the public commit and its own
 derived build number, not `bbc7d56660` and `10685`. Those values identify the
-already deployed binary. The compiled inference code remains identical at the
-clean snapshot commit.
+originally deployed binary. The compiled inference code remains identical at
+the clean snapshot commit. The current branch tip adds the upstream joint-fit
+logic and a local integration fix for compact shared-MTP sidecars.
+
+The shared-MTP fit candidate was built from the same source changes before they
+were replayed onto the documented public branch. It was tested with an Unsloth
+Qwen3.8 Flash Next UD-IQ4_XS target, the official shared Q8_0 MTP sidecar, and
+explicit `--fit on`. The server loaded successfully, exercised MTP with 39 of
+41 draft tokens accepted, and showed no missing shared-tensor, Vulkan shader,
+validation, NaN, or device-loss error. The original b10685 production binary
+does not contain this follow-up.
 
 The public history is intentionally squashed. The working production lineage
 contained upstream merges, cherry-picks, experiments, reversions, and local

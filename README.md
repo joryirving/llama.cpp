@@ -1,8 +1,9 @@
 # llama.cpp
 
 > [!IMPORTANT]
-> This b10685 branch is a tested Strix Halo production snapshot, not an
-> upstream llama.cpp release. Start with [PRODUCTION-SNAPSHOT.md](PRODUCTION-SNAPSHOT.md),
+> This b10685-based branch is a tested Strix Halo production snapshot with a
+> follow-up fix for fitting compact shared-MTP sidecars. It is not an upstream
+> llama.cpp release. Start with [PRODUCTION-SNAPSHOT.md](PRODUCTION-SNAPSHOT.md),
 > [PATCHSET.md](PATCHSET.md), and
 > [QWEN38-FLASH-NEXT-MTP.md](QWEN38-FLASH-NEXT-MTP.md). The `master` branch of
 > this fork continues to track the official upstream repository.
