@@ -1644,6 +1644,20 @@ bool llama_model_loader::load_all_data(
                 mmap_used.second = std::max(mmap_used.second, weight->offs + n_size);
             } else {
                 ggml_backend_tensor_set(cur, data, 0, n_size);
+
+                // [TAG_LOAD_RELEASE] the tensor now lives in its device buffer, so its mmap'd
+                // source pages are dead weight; release them right away instead of holding the
+                // whole non-lazy complement in the page cache until the end of the load. This
+                // bounds the load-time peak when the model shares a unified-memory pool with
+                // other workloads. unmap_fragment() trims the range to interior pages, so a
+                // boundary page shared with a neighbouring tensor stays mapped, and the final
+                // cleanup below tolerates re-unmapping the same region. Skip while the async
+                // check_tensors validation still reads from the mapping, when mlock holds the
+                // pages, and for lazy tensors (read from the mapping at runtime -- though those
+                // take the buf_mmap branch above, never this one).
+                if (!check_tensors && !lmlocks && !lazy.has(cur)) {
+                    mappings.at(weight->idx)->unmap_fragment(weight->offs, weight->offs + n_size);
+                }
             }
         } else {
             const auto & file = files.at(weight->idx);
