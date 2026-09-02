@@ -1697,7 +1697,7 @@ json server_task_result_apply_lora::to_json() {
 // the token list stays resident so prefix matching never needs to touch the disk.
 
 static const uint32_t SERVER_PROMPT_CACHE_FILE_MAGIC   = 0x50435331; // "PCS1"
-static const uint32_t SERVER_PROMPT_CACHE_FILE_VERSION = 1;
+static const uint32_t SERVER_PROMPT_CACHE_FILE_VERSION = 2;
 
 // A previous run's state files are still valid if they describe the same model and context,
 // so adopt them instead of decoding those prompts again. Anything foreign or unreadable is
@@ -1763,6 +1763,8 @@ size_t server_prompt_cache::index_dir(const llama_context * ctx) {
         uint64_t n_packed = 0;
         uint64_t n_main = 0;
         uint64_t n_drft = 0;
+        uint64_t n_ckpt = 0;
+        uint64_t n_ckpt_b = 0;
 
         file.read(reinterpret_cast<char *>(&magic),           sizeof(magic));
         file.read(reinterpret_cast<char *>(&version),         sizeof(version));
@@ -1770,6 +1772,9 @@ size_t server_prompt_cache::index_dir(const llama_context * ctx) {
         file.read(reinterpret_cast<char *>(&n_packed),        sizeof(n_packed));
         file.read(reinterpret_cast<char *>(&n_main),          sizeof(n_main));
         file.read(reinterpret_cast<char *>(&n_drft),          sizeof(n_drft));
+        file.read(reinterpret_cast<char *>(&n_ckpt),          sizeof(n_ckpt));
+        file.read(reinterpret_cast<char *>(&n_ckpt_b),        sizeof(n_ckpt_b));
+        GGML_UNUSED(n_ckpt);
 
         if (!file || magic != SERVER_PROMPT_CACHE_FILE_MAGIC || version != SERVER_PROMPT_CACHE_FILE_VERSION) {
             discard("not a state file of this version");
@@ -1793,7 +1798,7 @@ size_t server_prompt_cache::index_dir(const llama_context * ctx) {
             continue;
         }
 
-        const size_t size_file = n_packed + n_main + n_drft;
+        const size_t size_file = n_packed + n_main + n_drft + n_ckpt_b;
 
         if (limit_size_disk > 0 && size_disk() + size_file > limit_size_disk) {
             discard("does not fit the prompt cache disk limit");
@@ -1847,7 +1852,16 @@ bool server_prompt_cache::spill(server_prompt_cache_state & state) {
 
     const size_t size_main = state.data.main.size();
     const size_t size_drft = state.data.drft.size();
-    const size_t size_file = packed.size() + size_main + size_drft;
+
+    // this architecture cannot rewind a recurrent state, so a prompt that diverges from the
+    // cached one mid-sequence can only resume from a checkpoint. Storing them is what lets a
+    // spilled state be reused by anything but an exact continuation.
+    size_t size_ckpt = 0;
+    for (const auto & ckpt : state.prompt.checkpoints) {
+        size_ckpt += 4*sizeof(uint64_t) + ckpt.data_tgt.size() + ckpt.data_dft.size() + ckpt.data_spec.size();
+    }
+
+    const size_t size_file = packed.size() + size_main + size_drft + size_ckpt;
 
     make_room_disk(size_file);
 
@@ -1868,6 +1882,8 @@ bool server_prompt_cache::spill(server_prompt_cache_state & state) {
     const uint64_t n_packed = packed.size();
     const uint64_t n_main   = size_main;
     const uint64_t n_drft   = size_drft;
+    const uint64_t n_ckpt   = state.prompt.checkpoints.size();
+    const uint64_t n_ckpt_b = size_ckpt;
 
     file.write(reinterpret_cast<const char *>(&SERVER_PROMPT_CACHE_FILE_MAGIC),   sizeof(SERVER_PROMPT_CACHE_FILE_MAGIC));
     file.write(reinterpret_cast<const char *>(&SERVER_PROMPT_CACHE_FILE_VERSION), sizeof(SERVER_PROMPT_CACHE_FILE_VERSION));
@@ -1875,9 +1891,27 @@ bool server_prompt_cache::spill(server_prompt_cache_state & state) {
     file.write(reinterpret_cast<const char *>(&n_packed), sizeof(n_packed));
     file.write(reinterpret_cast<const char *>(&n_main),   sizeof(n_main));
     file.write(reinterpret_cast<const char *>(&n_drft),   sizeof(n_drft));
+    file.write(reinterpret_cast<const char *>(&n_ckpt),   sizeof(n_ckpt));
+    file.write(reinterpret_cast<const char *>(&n_ckpt_b), sizeof(n_ckpt_b));
     file.write(packed.data(), packed.size());
     file.write(reinterpret_cast<const char *>(state.data.main.data()), size_main);
     file.write(reinterpret_cast<const char *>(state.data.drft.data()), size_drft);
+
+    for (const auto & ckpt : state.prompt.checkpoints) {
+        const uint64_t n_tokens = (uint64_t) ckpt.n_tokens;
+        const int64_t  pos_min  = (int64_t)  ckpt.pos_min;
+        const int64_t  pos_max  = (int64_t)  ckpt.pos_max;
+        const uint64_t sizes[3] = { ckpt.data_tgt.size(), ckpt.data_dft.size(), ckpt.data_spec.size() };
+
+        file.write(reinterpret_cast<const char *>(&n_tokens), sizeof(n_tokens));
+        file.write(reinterpret_cast<const char *>(&pos_min),  sizeof(pos_min));
+        file.write(reinterpret_cast<const char *>(&pos_max),  sizeof(pos_max));
+        file.write(reinterpret_cast<const char *>(sizes),     sizeof(sizes));
+        file.write(reinterpret_cast<const char *>(ckpt.data_tgt.data()),  (std::streamsize) sizes[0]);
+        file.write(reinterpret_cast<const char *>(ckpt.data_dft.data()),  (std::streamsize) sizes[1]);
+        file.write(reinterpret_cast<const char *>(ckpt.data_spec.data()), (std::streamsize) sizes[2]);
+    }
+
     file.flush();
 
     if (!file) {
@@ -1888,10 +1922,10 @@ bool server_prompt_cache::spill(server_prompt_cache_state & state) {
     }
     file.close();
 
-    SRV_WRN(" - spilled prompt cache entry to disk (%d tokens, %.3f MiB)\n",
-            state.prompt.n_tokens(), size_file / (1024.0 * 1024.0));
+    SRV_WRN(" - spilled prompt cache entry to disk (%d tokens, %zu checkpoints, %.3f MiB)\n",
+            state.prompt.n_tokens(), state.prompt.checkpoints.size(), size_file / (1024.0 * 1024.0));
 
-    // the checkpoints only speed up a partial re-decode, so drop them rather than store them
+    // they are on disk now, so release the memory they were holding
     state.prompt.checkpoints.clear();
 
     state.data.main.clear();
@@ -1922,6 +1956,8 @@ bool server_prompt_cache::unspill(server_prompt_cache_state & state) {
     uint64_t n_packed = 0;
     uint64_t n_main = 0;
     uint64_t n_drft = 0;
+    uint64_t n_ckpt = 0;
+    uint64_t n_ckpt_b = 0;
 
     file.read(reinterpret_cast<char *>(&magic),           sizeof(magic));
     file.read(reinterpret_cast<char *>(&version),         sizeof(version));
@@ -1929,6 +1965,8 @@ bool server_prompt_cache::unspill(server_prompt_cache_state & state) {
     file.read(reinterpret_cast<char *>(&n_packed),        sizeof(n_packed));
     file.read(reinterpret_cast<char *>(&n_main),          sizeof(n_main));
     file.read(reinterpret_cast<char *>(&n_drft),          sizeof(n_drft));
+    file.read(reinterpret_cast<char *>(&n_ckpt),          sizeof(n_ckpt));
+    file.read(reinterpret_cast<char *>(&n_ckpt_b),        sizeof(n_ckpt_b));
 
     if (!file || magic != SERVER_PROMPT_CACHE_FILE_MAGIC || version != SERVER_PROMPT_CACHE_FILE_VERSION) {
         SRV_WRN(" - prompt cache file '%s' is not a state file of this version\n", state.path.c_str());
@@ -1948,6 +1986,38 @@ bool server_prompt_cache::unspill(server_prompt_cache_state & state) {
     file.read(reinterpret_cast<char *>(main_cur.data()), (std::streamsize) n_main);
     file.read(reinterpret_cast<char *>(drft_cur.data()), (std::streamsize) n_drft);
 
+    std::list<common_prompt_checkpoint> ckpts_cur;
+
+    for (uint64_t i = 0; i < n_ckpt; ++i) {
+        uint64_t n_tokens = 0;
+        int64_t  pos_min = 0;
+        int64_t  pos_max = 0;
+        uint64_t sizes[3] = { 0, 0, 0 };
+
+        file.read(reinterpret_cast<char *>(&n_tokens), sizeof(n_tokens));
+        file.read(reinterpret_cast<char *>(&pos_min),  sizeof(pos_min));
+        file.read(reinterpret_cast<char *>(&pos_max),  sizeof(pos_max));
+        file.read(reinterpret_cast<char *>(sizes),     sizeof(sizes));
+
+        if (!file) {
+            break;
+        }
+
+        auto & ckpt = ckpts_cur.emplace_back();
+
+        ckpt.n_tokens = (int64_t) n_tokens;
+        ckpt.pos_min  = (llama_pos) pos_min;
+        ckpt.pos_max  = (llama_pos) pos_max;
+
+        ckpt.data_tgt .resize(sizes[0]);
+        ckpt.data_dft .resize(sizes[1]);
+        ckpt.data_spec.resize(sizes[2]);
+
+        file.read(reinterpret_cast<char *>(ckpt.data_tgt .data()), (std::streamsize) sizes[0]);
+        file.read(reinterpret_cast<char *>(ckpt.data_dft .data()), (std::streamsize) sizes[1]);
+        file.read(reinterpret_cast<char *>(ckpt.data_spec.data()), (std::streamsize) sizes[2]);
+    }
+
     if (!file) {
         SRV_WRN(" - prompt cache file '%s' is truncated\n", state.path.c_str());
         return false;
@@ -1956,6 +2026,7 @@ bool server_prompt_cache::unspill(server_prompt_cache_state & state) {
 
     state.data.main = std::move(main_cur);
     state.data.drft = std::move(drft_cur);
+    state.prompt.checkpoints = std::move(ckpts_cur);
 
     std::remove(state.path.c_str());
     state.path.clear();
