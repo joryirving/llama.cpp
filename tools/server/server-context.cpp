@@ -1288,9 +1288,12 @@ private:
                 prompt_cache->limit_size_disk = params_base.cache_disk_mib < 0 ?
                     0 : 1024ull*1024ull*params_base.cache_disk_mib;
 
-                const size_t n_stale = prompt_cache->clear_dir();
-                if (n_stale > 0) {
-                    SRV_WRN("removed %zu prompt cache state file(s) left by an earlier run\n", n_stale);
+                prompt_cache->has_mtmd = mctx != nullptr;
+
+                const size_t n_adopted = prompt_cache->index_dir(ctx_tgt);
+                if (n_adopted > 0) {
+                    SRV_WRN("adopted %zu prompt cache state(s) from an earlier run (%.3f MiB)\n",
+                            n_adopted, prompt_cache->size_disk() / (1024.0 * 1024.0));
                 }
 
                 SRV_TRC("prompt cache spills to '%s', disk limit: %s\n", params_base.cache_dir.c_str(),

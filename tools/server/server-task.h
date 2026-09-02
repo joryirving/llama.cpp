@@ -639,8 +639,13 @@ struct server_prompt_cache {
     // identifies the model/context the spilled blobs belong to
     uint64_t fingerprint = 0;
 
-    // delete state files left in `dir` by an earlier run; returns how many were removed
-    size_t clear_dir();
+    // whether the token lists may contain media chunks, needed to deserialize them
+    bool has_mtmd = false;
+
+    // adopt the state files an earlier run left in `dir`, so the cache survives a restart.
+    // files belonging to another model or context, and unreadable ones, are deleted.
+    // returns how many entries were adopted.
+    size_t index_dir(const llama_context * ctx);
 
     size_t size() const;
 

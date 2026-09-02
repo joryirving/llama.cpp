@@ -1,6 +1,7 @@
 #include "server-task.h"
 
 #include <cstdio>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 
@@ -1698,15 +1699,17 @@ json server_task_result_apply_lora::to_json() {
 static const uint32_t SERVER_PROMPT_CACHE_FILE_MAGIC   = 0x50435331; // "PCS1"
 static const uint32_t SERVER_PROMPT_CACHE_FILE_VERSION = 1;
 
-// blobs left behind by a previous run cannot be indexed by this one, and a crash (an OOM kill,
-// say) skips the destructor, so sweep the directory before writing anything new to it.
+// A previous run's state files are still valid if they describe the same model and context,
+// so adopt them instead of decoding those prompts again. Anything foreign or unreadable is
+// deleted: a crash skips the destructor, and the directory must not grow without bound.
 // The directory must belong to a single server for this reason.
-size_t server_prompt_cache::clear_dir() {
+size_t server_prompt_cache::index_dir(const llama_context * ctx) {
     if (dir.empty()) {
         return 0;
     }
 
-    size_t n_removed = 0;
+    // spill order is encoded in the file names, and the list has to stay oldest-first
+    std::vector<std::pair<size_t, std::string>> found;
 
     std::error_code ec;
     for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
@@ -1716,27 +1719,117 @@ size_t server_prompt_cache::clear_dir() {
             continue;
         }
 
-        std::error_code ec_rm;
-        std::filesystem::remove(it->path(), ec_rm);
-        if (!ec_rm) {
-            n_removed++;
+        size_t idx = 0;
+        try {
+            idx = (size_t) std::stoull(name.substr(6));
+        } catch (const std::exception &) {
+            continue;
         }
+
+        found.emplace_back(idx, it->path().string());
     }
 
     if (ec) {
         SRV_WRN(" - cannot read the prompt cache directory '%s': %s\n", dir.c_str(), ec.message().c_str());
+        return 0;
     }
 
-    return n_removed;
+    std::sort(found.begin(), found.end());
+
+    // do not reuse a name that is still on disk
+    if (!found.empty()) {
+        i_file = found.back().first + 1;
+    }
+
+    size_t n_adopted = 0;
+
+    for (const auto & [idx, path_cur] : found) {
+        GGML_UNUSED(idx);
+
+        const auto discard = [&path_cur](const char * reason) {
+            SRV_WRN(" - discarding prompt cache file '%s': %s\n", path_cur.c_str(), reason);
+            std::remove(path_cur.c_str());
+        };
+
+        std::ifstream file(path_cur, std::ios::binary);
+        if (!file) {
+            discard("cannot be opened");
+            continue;
+        }
+
+        uint32_t magic = 0;
+        uint32_t version = 0;
+        uint64_t fingerprint_cur = 0;
+        uint64_t n_packed = 0;
+        uint64_t n_main = 0;
+        uint64_t n_drft = 0;
+
+        file.read(reinterpret_cast<char *>(&magic),           sizeof(magic));
+        file.read(reinterpret_cast<char *>(&version),         sizeof(version));
+        file.read(reinterpret_cast<char *>(&fingerprint_cur), sizeof(fingerprint_cur));
+        file.read(reinterpret_cast<char *>(&n_packed),        sizeof(n_packed));
+        file.read(reinterpret_cast<char *>(&n_main),          sizeof(n_main));
+        file.read(reinterpret_cast<char *>(&n_drft),          sizeof(n_drft));
+
+        if (!file || magic != SERVER_PROMPT_CACHE_FILE_MAGIC || version != SERVER_PROMPT_CACHE_FILE_VERSION) {
+            discard("not a state file of this version");
+            continue;
+        }
+
+        if (fingerprint_cur != fingerprint) {
+            discard("belongs to a different model or context");
+            continue;
+        }
+
+        if (n_packed == 0 || n_packed % sizeof(llama_token) != 0) {
+            discard("has no usable token list");
+            continue;
+        }
+
+        llama_tokens packed(n_packed / sizeof(llama_token));
+        file.read(reinterpret_cast<char *>(packed.data()), (std::streamsize) n_packed);
+        if (!file) {
+            discard("is truncated");
+            continue;
+        }
+
+        const size_t size_file = n_packed + n_main + n_drft;
+
+        if (limit_size_disk > 0 && size_disk() + size_file > limit_size_disk) {
+            discard("does not fit the prompt cache disk limit");
+            continue;
+        }
+
+        server_prompt prompt_cur;
+        try {
+            prompt_cur.tokens = server_tokens::deserialize(packed, has_mtmd);
+        } catch (const std::exception & err) {
+            discard(err.what());
+            continue;
+        }
+
+        // the tokens have to mean the same thing to this model as they did to the last one
+        if (!prompt_cur.tokens.validate(ctx)) {
+            discard("holds tokens this model cannot represent");
+            continue;
+        }
+
+        states.push_back({
+            /*.prompt    =*/ std::move(prompt_cur),
+            /*.data      =*/ {},
+            /*.path      =*/ path_cur,
+            /*.size_disk =*/ size_file,
+        });
+
+        n_adopted++;
+    }
+
+    return n_adopted;
 }
 
 server_prompt_cache::~server_prompt_cache() {
-    // the blobs are only valid for this process's model and context, so do not leave them behind
-    for (auto & state : states) {
-        if (state.on_disk()) {
-            std::remove(state.path.c_str());
-        }
-    }
+    // the files are left in place on purpose: the next run adopts the ones whose fingerprint
+    // still matches, which is what makes the cache survive a restart
 }
 
 bool server_prompt_cache::spill(server_prompt_cache_state & state) {
