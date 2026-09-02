@@ -1265,6 +1265,38 @@ private:
             SRV_TRC("%s", "use `--cache-ram 0` to disable the prompt cache\n");
 
             prompt_cache = std::make_unique<server_prompt_cache>(params_base.cache_ram_mib, n_ctx);
+
+            if (!params_base.cache_dir.empty() && params_base.cache_disk_mib != 0) {
+                // the state blobs are only meaningful for this exact model and context layout
+                const std::string sig =
+                    params_base.model.path + "|" +
+                    params_base.speculative.draft.mparams.path + "|" +
+                    std::to_string(n_ctx) + "|" +
+                    std::to_string(params_base.n_parallel) + "|" +
+                    std::to_string((int) params_base.cache_type_k) + "|" +
+                    std::to_string((int) params_base.cache_type_v) + "|" +
+                    std::to_string(llama_model_n_embd_inp(model_tgt)) + "|" +
+                    std::to_string(llama_vocab_n_tokens(llama_model_get_vocab(model_tgt)));
+
+                uint64_t fingerprint = 0xcbf29ce484222325ull;
+                for (const char c : sig) {
+                    fingerprint = (fingerprint ^ (uint8_t) c) * 0x100000001b3ull;
+                }
+
+                prompt_cache->dir             = params_base.cache_dir;
+                prompt_cache->fingerprint     = fingerprint;
+                prompt_cache->limit_size_disk = params_base.cache_disk_mib < 0 ?
+                    0 : 1024ull*1024ull*params_base.cache_disk_mib;
+
+                const size_t n_stale = prompt_cache->clear_dir();
+                if (n_stale > 0) {
+                    SRV_WRN("removed %zu prompt cache state file(s) left by an earlier run\n", n_stale);
+                }
+
+                SRV_TRC("prompt cache spills to '%s', disk limit: %s\n", params_base.cache_dir.c_str(),
+                        params_base.cache_disk_mib < 0 ? "no limit" :
+                            (std::to_string(params_base.cache_disk_mib) + " MiB").c_str());
+            }
         } else {
             SRV_TRC("%s", "prompt cache is disabled - use `--cache-ram N` to enable it\n");
         }

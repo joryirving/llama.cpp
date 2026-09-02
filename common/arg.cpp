@@ -1711,6 +1711,28 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CACHE_RAM").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
+        {"--cache-dir"}, "PATH",
+        "directory used to hold prompt cache states evicted from RAM; reloading one from here is much cheaper "
+        "than decoding the prompt again. must not be shared with another server: leftover state files are "
+        "deleted at startup (default: disabled)",
+        [](common_params & params, const std::string & value) {
+            if (!value.empty() && !fs_is_directory(value)) {
+                throw std::invalid_argument("directory does not exist");
+            }
+            params.cache_dir = value;
+            if (!params.cache_dir.empty() && params.cache_dir[params.cache_dir.size() - 1] != DIRECTORY_SEPARATOR) {
+                params.cache_dir += DIRECTORY_SEPARATOR;
+            }
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CACHE_DIR"));
+    add_opt(common_arg(
+        {"--cache-disk"}, "N",
+        string_format("prompt cache size limit on disk, requires --cache-dir, in MiB (default: %d, -1 = no limit, 0 = disable)", params.cache_disk_mib),
+        [](common_params & params, int value) {
+            params.cache_disk_mib = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CACHE_DISK"));
+    add_opt(common_arg(
         {"-kvu", "--kv-unified"},
         {"-no-kvu", "--no-kv-unified"},
         "use single unified KV buffer shared across all sequences (default: enabled if number of slots is auto)",
