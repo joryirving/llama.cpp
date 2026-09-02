@@ -26,8 +26,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ccache-mount
-          key: ccache-vulkan-${{ github.sha }}
+          key: ccache-vulkan-${{ github.ref_name }}-${{ github.sha }}
           restore-keys: |
+            ccache-vulkan-${{ github.ref_name }}-
             ccache-vulkan-
       - name: Restore ccache into buildkit
         uses: reproducible-containers/buildkit-cache-dance@v3
@@ -51,5 +52,7 @@ jobs:
           target: server
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/llama-qwen4exp:${{ inputs.tag }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/llama-qwen4exp:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/llama-qwen4exp:buildcache,mode=max,image-manifest=true
       - name: Digest
         run: echo "ghcr.io/${{ github.repository_owner }}/llama-qwen4exp:${{ inputs.tag }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
