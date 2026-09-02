@@ -1833,8 +1833,28 @@ size_t server_prompt_cache::index_dir(const llama_context * ctx) {
 }
 
 server_prompt_cache::~server_prompt_cache() {
-    // the files are left in place on purpose: the next run adopts the ones whose fingerprint
-    // still matches, which is what makes the cache survive a restart
+    if (dir.empty()) {
+        return;
+    }
+
+    // Existing files are left in place, and the states still resident are written out beside
+    // them: what makes a restart cheap is finding the whole cache on disk, not just whatever
+    // had already overflowed. The next run adopts the ones whose fingerprint still matches.
+    size_t n_flushed = 0;
+
+    for (auto & state : states) {
+        if (state.on_disk()) {
+            continue;
+        }
+
+        if (spill(state)) {
+            n_flushed++;
+        }
+    }
+
+    if (n_flushed > 0) {
+        SRV_WRN("flushed %zu prompt cache state(s) to disk for the next run\n", n_flushed);
+    }
 }
 
 bool server_prompt_cache::spill(server_prompt_cache_state & state) {
