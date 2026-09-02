@@ -1,5 +1,9 @@
 #include "server-task.h"
 
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+
 #include "build-info.h"
 #include "server-chat.h"
 #include "chat.h"
@@ -1685,6 +1689,224 @@ json server_task_result_apply_lora::to_json() {
 //
 // server_prompt_cache
 //
+// ---- disk-backed prompt cache ----------------------------------------------
+//
+// A state evicted for want of RAM is written to `dir` instead of being dropped, so a long
+// conversation survives another prompt passing through the cache. Only the state blobs move:
+// the token list stays resident so prefix matching never needs to touch the disk.
+
+static const uint32_t SERVER_PROMPT_CACHE_FILE_MAGIC   = 0x50435331; // "PCS1"
+static const uint32_t SERVER_PROMPT_CACHE_FILE_VERSION = 1;
+
+// blobs left behind by a previous run cannot be indexed by this one, and a crash (an OOM kill,
+// say) skips the destructor, so sweep the directory before writing anything new to it.
+// The directory must belong to a single server for this reason.
+size_t server_prompt_cache::clear_dir() {
+    if (dir.empty()) {
+        return 0;
+    }
+
+    size_t n_removed = 0;
+
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+
+        if (name.rfind("state-", 0) != 0 || it->path().extension() != ".bin") {
+            continue;
+        }
+
+        std::error_code ec_rm;
+        std::filesystem::remove(it->path(), ec_rm);
+        if (!ec_rm) {
+            n_removed++;
+        }
+    }
+
+    if (ec) {
+        SRV_WRN(" - cannot read the prompt cache directory '%s': %s\n", dir.c_str(), ec.message().c_str());
+    }
+
+    return n_removed;
+}
+
+server_prompt_cache::~server_prompt_cache() {
+    // the blobs are only valid for this process's model and context, so do not leave them behind
+    for (auto & state : states) {
+        if (state.on_disk()) {
+            std::remove(state.path.c_str());
+        }
+    }
+}
+
+bool server_prompt_cache::spill(server_prompt_cache_state & state) {
+    if (dir.empty() || state.on_disk()) {
+        return false;
+    }
+
+    std::vector<char> packed;
+    try {
+        packed = state.prompt.tokens.serialize();
+    } catch (const std::exception & err) {
+        SRV_WRN(" - cannot serialize tokens for the prompt cache file: %s\n", err.what());
+        return false;
+    }
+
+    const size_t size_main = state.data.main.size();
+    const size_t size_drft = state.data.drft.size();
+    const size_t size_file = packed.size() + size_main + size_drft;
+
+    make_room_disk(size_file);
+
+    if (limit_size_disk > 0 && size_disk() + size_file > limit_size_disk) {
+        SRV_WRN(" - prompt state %.3f MiB does not fit the prompt cache disk limit %.3f MiB\n",
+                size_file / (1024.0 * 1024.0), limit_size_disk / (1024.0 * 1024.0));
+        return false;
+    }
+
+    const std::string path_cur = dir + "state-" + std::to_string(i_file++) + ".bin";
+
+    std::ofstream file(path_cur, std::ios::binary);
+    if (!file) {
+        SRV_WRN(" - cannot open prompt cache file '%s' for writing\n", path_cur.c_str());
+        return false;
+    }
+
+    const uint64_t n_packed = packed.size();
+    const uint64_t n_main   = size_main;
+    const uint64_t n_drft   = size_drft;
+
+    file.write(reinterpret_cast<const char *>(&SERVER_PROMPT_CACHE_FILE_MAGIC),   sizeof(SERVER_PROMPT_CACHE_FILE_MAGIC));
+    file.write(reinterpret_cast<const char *>(&SERVER_PROMPT_CACHE_FILE_VERSION), sizeof(SERVER_PROMPT_CACHE_FILE_VERSION));
+    file.write(reinterpret_cast<const char *>(&fingerprint), sizeof(fingerprint));
+    file.write(reinterpret_cast<const char *>(&n_packed), sizeof(n_packed));
+    file.write(reinterpret_cast<const char *>(&n_main),   sizeof(n_main));
+    file.write(reinterpret_cast<const char *>(&n_drft),   sizeof(n_drft));
+    file.write(packed.data(), packed.size());
+    file.write(reinterpret_cast<const char *>(state.data.main.data()), size_main);
+    file.write(reinterpret_cast<const char *>(state.data.drft.data()), size_drft);
+    file.flush();
+
+    if (!file) {
+        SRV_WRN(" - failed to write prompt cache file '%s'\n", path_cur.c_str());
+        file.close();
+        std::remove(path_cur.c_str());
+        return false;
+    }
+    file.close();
+
+    SRV_WRN(" - spilled prompt cache entry to disk (%d tokens, %.3f MiB)\n",
+            state.prompt.n_tokens(), size_file / (1024.0 * 1024.0));
+
+    // the checkpoints only speed up a partial re-decode, so drop them rather than store them
+    state.prompt.checkpoints.clear();
+
+    state.data.main.clear();
+    state.data.main.shrink_to_fit();
+    state.data.drft.clear();
+    state.data.drft.shrink_to_fit();
+
+    state.path      = path_cur;
+    state.size_disk = size_file;
+
+    return true;
+}
+
+bool server_prompt_cache::unspill(server_prompt_cache_state & state) {
+    if (!state.on_disk()) {
+        return true;
+    }
+
+    std::ifstream file(state.path, std::ios::binary);
+    if (!file) {
+        SRV_WRN(" - cannot open prompt cache file '%s' for reading\n", state.path.c_str());
+        return false;
+    }
+
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    uint64_t fingerprint_cur = 0;
+    uint64_t n_packed = 0;
+    uint64_t n_main = 0;
+    uint64_t n_drft = 0;
+
+    file.read(reinterpret_cast<char *>(&magic),           sizeof(magic));
+    file.read(reinterpret_cast<char *>(&version),         sizeof(version));
+    file.read(reinterpret_cast<char *>(&fingerprint_cur), sizeof(fingerprint_cur));
+    file.read(reinterpret_cast<char *>(&n_packed),        sizeof(n_packed));
+    file.read(reinterpret_cast<char *>(&n_main),          sizeof(n_main));
+    file.read(reinterpret_cast<char *>(&n_drft),          sizeof(n_drft));
+
+    if (!file || magic != SERVER_PROMPT_CACHE_FILE_MAGIC || version != SERVER_PROMPT_CACHE_FILE_VERSION) {
+        SRV_WRN(" - prompt cache file '%s' is not a state file of this version\n", state.path.c_str());
+        return false;
+    }
+
+    // the blob layout depends on the model and the context parameters, so refuse a foreign one
+    if (fingerprint_cur != fingerprint) {
+        SRV_WRN(" - prompt cache file '%s' belongs to a different model or context\n", state.path.c_str());
+        return false;
+    }
+
+    std::vector<uint8_t> main_cur(n_main);
+    std::vector<uint8_t> drft_cur(n_drft);
+
+    file.seekg((std::streamoff) n_packed, std::ios::cur);
+    file.read(reinterpret_cast<char *>(main_cur.data()), (std::streamsize) n_main);
+    file.read(reinterpret_cast<char *>(drft_cur.data()), (std::streamsize) n_drft);
+
+    if (!file) {
+        SRV_WRN(" - prompt cache file '%s' is truncated\n", state.path.c_str());
+        return false;
+    }
+    file.close();
+
+    state.data.main = std::move(main_cur);
+    state.data.drft = std::move(drft_cur);
+
+    std::remove(state.path.c_str());
+    state.path.clear();
+    state.size_disk = 0;
+
+    return true;
+}
+
+std::list<server_prompt_cache_state>::iterator server_prompt_cache::drop(std::list<server_prompt_cache_state>::iterator it) {
+    if (it->on_disk()) {
+        std::remove(it->path.c_str());
+    }
+
+    return states.erase(it);
+}
+
+void server_prompt_cache::make_room_disk(size_t need) {
+    if (limit_size_disk == 0) {
+        return;
+    }
+
+    for (auto it = states.begin(); it != states.end() && size_disk() + need > limit_size_disk; ) {
+        if (!it->on_disk()) {
+            ++it;
+            continue;
+        }
+
+        SRV_WRN(" - prompt cache disk limit reached, removing oldest spilled entry (size = %.3f MiB)\n",
+                it->size_disk / (1024.0 * 1024.0));
+
+        it = drop(it);
+    }
+}
+
+size_t server_prompt_cache::size_disk() const {
+    size_t res = 0;
+
+    for (const auto & state : states) {
+        res += state.size_disk;
+    }
+
+    return res;
+}
+
 size_t server_prompt_cache::size() const {
     size_t res = 0;
 
@@ -1699,6 +1921,10 @@ size_t server_prompt_cache::n_tokens() const {
     size_t res = 0;
 
     for (const auto & state : states) {
+        if (state.on_disk()) {
+            continue;
+        }
+
         res += state.prompt.n_tokens();
     }
 
@@ -1738,7 +1964,7 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
         if (len == (int) it->prompt.tokens.size()) {
             SRV_TRC(" - removing obsolete cached prompt with length %d\n", len);
 
-            it = states.erase(it);
+            it = drop(it);
         } else {
             ++it;
         }
@@ -1746,11 +1972,23 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
 
     if (limit_size > 0) {
         // make room before allocating the new vectors to avoid breaching the limit
-        while (!states.empty() && size() + state_size_new > limit_size) {
-            SRV_WRN(" - making room for prompt cache entry, removing oldest entry (size = %.3f MiB)\n",
-                    states.front().size() / (1024.0 * 1024.0));
+        for (auto it = states.begin(); it != states.end() && size() + state_size_new > limit_size; ) {
+            if (it->on_disk()) {
+                ++it;
+                continue;
+            }
 
-            states.pop_front();
+            const double size_mib = it->size() / (1024.0 * 1024.0);
+
+            // prefer moving the state out to disk: reading it back beats decoding the prompt again
+            if (spill(*it)) {
+                ++it;
+                continue;
+            }
+
+            SRV_WRN(" - making room for prompt cache entry, removing oldest entry (size = %.3f MiB)\n", size_mib);
+
+            it = drop(it);
         }
     }
 
@@ -1782,6 +2020,8 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
             /*.main =*/ std::move(state_data_tgt),
             /*.drft =*/ std::move(state_data_dft),
         },
+        /*.path      =*/ "",
+        /*.size_disk =*/ 0,
     });
 
     return &states.back();
@@ -1821,6 +2061,22 @@ bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tok
 
     if (it_best != states.end()) {
         SRV_TRC(" - found better prompt with f_keep = %.3f, f_sim = %.3f\n", f_keep_best, f_sim_best);
+
+        if (it_best->on_disk()) {
+            const int64_t t_start_us = ggml_time_us();
+            const double  size_mib   = it_best->size_disk / (1024.0 * 1024.0);
+
+            if (!unspill(*it_best)) {
+                SRV_WRN("%s", " - failed to read the spilled prompt state, dropping it\n");
+
+                drop(it_best);
+
+                return true;
+            }
+
+            SRV_WRN(" - restored a spilled prompt state from disk (%.3f MiB, %.2f ms)\n",
+                    size_mib, (ggml_time_us() - t_start_us) / 1000.0);
+        }
 
         {
             auto & data = it_best->data.main;
@@ -1866,10 +2122,22 @@ bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tok
 
 void server_prompt_cache::update() {
     if (limit_size > 0) {
-        while (!states.empty() && size() > limit_size) {
-            SRV_WRN(" - cache size limit reached, removing oldest entry (size = %.3f MiB)\n", states.front().size() / (1024.0 * 1024.0));
+        for (auto it = states.begin(); it != states.end() && size() > limit_size; ) {
+            if (it->on_disk()) {
+                ++it;
+                continue;
+            }
 
-            states.pop_front();
+            const double size_mib = it->size() / (1024.0 * 1024.0);
+
+            if (spill(*it)) {
+                ++it;
+                continue;
+            }
+
+            SRV_WRN(" - cache size limit reached, removing oldest entry (size = %.3f MiB)\n", size_mib);
+
+            it = drop(it);
         }
     }
 
@@ -1880,11 +2148,23 @@ void server_prompt_cache::update() {
     const size_t limit_tokens_cur = limit_size > 0 ? std::max<size_t>(limit_tokens, limit_size/size_per_token) : limit_tokens;
 
     if (limit_tokens > 0) {
-        while (!states.empty() && n_tokens() > limit_tokens_cur) {
-            SRV_WRN(" - cache token limit (%zu, est: %zu) reached, removing oldest entry (size = %.3f MiB)\n",
-                    limit_tokens, limit_tokens_cur, states.front().size() / (1024.0 * 1024.0));
+        for (auto it = states.begin(); it != states.end() && n_tokens() > limit_tokens_cur; ) {
+            if (it->on_disk()) {
+                ++it;
+                continue;
+            }
 
-            states.pop_front();
+            const double size_mib = it->size() / (1024.0 * 1024.0);
+
+            if (spill(*it)) {
+                ++it;
+                continue;
+            }
+
+            SRV_WRN(" - cache token limit (%zu, est: %zu) reached, removing oldest entry (size = %.3f MiB)\n",
+                    limit_tokens, limit_tokens_cur, size_mib);
+
+            it = drop(it);
         }
     }
 

@@ -593,6 +593,16 @@ struct server_prompt_cache_state {
     server_prompt prompt;
     server_prompt_data data;
 
+    // when non-empty, the state data lives in this file instead of in `data`.
+    // the token list stays resident either way so prefix matching does not need the file.
+    std::string path;
+    size_t size_disk = 0;
+
+    bool on_disk() const {
+        return !path.empty();
+    }
+
+    // resident cost only: a spilled state has empty vectors and no checkpoints
     size_t size() const {
         size_t res = data.size();
 
@@ -610,6 +620,8 @@ struct server_prompt_cache {
         this->limit_tokens = limit_tokens;
     }
 
+    ~server_prompt_cache();
+
     std::list<server_prompt_cache_state> states;
 
     // in bytes, 0 = no limit
@@ -618,7 +630,21 @@ struct server_prompt_cache {
     // in tokens, 0 = no limit
     size_t limit_tokens = 0;
 
+    // when set, states evicted for want of RAM are written here instead of being dropped
+    std::string dir;
+
+    // in bytes, 0 = no limit
+    size_t limit_size_disk = 0;
+
+    // identifies the model/context the spilled blobs belong to
+    uint64_t fingerprint = 0;
+
+    // delete state files left in `dir` by an earlier run; returns how many were removed
+    size_t clear_dir();
+
     size_t size() const;
+
+    size_t size_disk() const;
 
     size_t n_tokens() const;
 
@@ -627,6 +653,21 @@ struct server_prompt_cache {
     bool load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot);
 
     void update();
+
+private:
+    // move a state's data out to a file. returns false if it could not be written.
+    bool spill(server_prompt_cache_state & state);
+
+    // read a spilled state's data back into memory. returns false if the file is unusable.
+    bool unspill(server_prompt_cache_state & state);
+
+    // drop `it`, deleting its file if it has one
+    std::list<server_prompt_cache_state>::iterator drop(std::list<server_prompt_cache_state>::iterator it);
+
+    // evict spilled states, oldest first, until the disk budget fits `need` more bytes
+    void make_room_disk(size_t need);
+
+    size_t i_file = 0;
 };
 
 // used exclusively by router mode
