@@ -55,7 +55,12 @@ struct scoped_roctx_range {
     explicit scoped_roctx_range(const char *) {}
 };
 
-struct scoped_roctx_profile {};
+struct scoped_roctx_profile {
+    // non-trivial ctor/dtor: the object is only ever used for its scope, so a trivial
+    // type would trip -Werror=unused-variable at the call site
+    scoped_roctx_profile() {}
+    ~scoped_roctx_profile() {}
+};
 #endif
 
 #ifdef _WIN32
