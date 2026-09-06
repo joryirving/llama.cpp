@@ -3967,10 +3967,23 @@ static vk_fa_tuning_params get_fa_tuning_params_coopmat1(const vk_device& device
 
     const uint32_t D = hsk | hsv;
 
-    const uint32_t coopmat_block_rows = 16;
+    // Diagnostic overrides for the coopmat1 workgroup shape. The tile is Br x Bc with
+    // num_subgroups subgroups splitting the rows. Both must stay multiples of the coopmat
+    // 16x16x16 shape, and Bc must divide evenly by the subgroup size (checked below); an
+    // invalid combination falls back to the tuned defaults rather than tripping the asserts.
+    static const uint32_t fa_env_subgroups = [] {
+        const char * e = getenv("GGML_VK_FA_SUBGROUPS");
+        return e ? (uint32_t) atoi(e) : 4u;
+    }();
+    static const uint32_t fa_env_block_rows = [] {
+        const char * e = getenv("GGML_VK_FA_BR");
+        return e ? (uint32_t) atoi(e) : 16u;
+    }();
+
+    const uint32_t coopmat_block_rows = (fa_env_block_rows >= 16 && (fa_env_block_rows % 16) == 0) ? fa_env_block_rows : 16;
     const uint32_t coopmat_block_cols = 16;
 
-    const uint32_t num_subgroups = 4;
+    const uint32_t num_subgroups = (fa_env_subgroups >= 1 && fa_env_subgroups <= 16) ? fa_env_subgroups : 4;
 
     result.block_rows = coopmat_block_rows;
     result.block_cols = coopmat_block_cols * num_subgroups;
@@ -4004,6 +4017,16 @@ static vk_fa_tuning_params get_fa_tuning_params_coopmat1(const vk_device& device
     }
 
     result.workgroup_size = num_subgroups * result.subgroup_size;
+
+    // Reject an override that would violate the shader's invariants and re-derive the defaults.
+    if ((result.block_cols % result.subgroup_size) != 0 ||
+        result.workgroup_size != result.row_split * result.subgroup_size ||
+        result.workgroup_size > device->properties.limits.maxComputeWorkGroupInvocations) {
+        result.block_rows = 16;
+        result.block_cols = 16 * 4;
+        result.row_split = 4;
+        result.workgroup_size = 4 * result.subgroup_size;
+    }
 
     // threads_per_rowgroup == the real subgroup size is load-bearing in three places:
     // the subgroupMax row reduction, the subgroupAdd of Lf, and tmpsh[gl_SubgroupID], which is
