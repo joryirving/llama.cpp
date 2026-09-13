@@ -96,12 +96,16 @@ ARG ROCR_INSTALL=/opt/custom/rocr
 ARG HIP_INSTALL=/opt/custom/hip
 ENV LLAMA_ARG_HOST=0.0.0.0
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libgomp1 curl libdrm2 libnuma1 libelf1 libdw1 libzstd1 libpciaccess0 zlib1g libudev1 \
+      libgomp1 curl libdrm2 libdrm-amdgpu1 libnuma1 libelf1 libdw1 libzstd1 libpciaccess0 zlib1g libudev1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build ${ROCR_INSTALL}/lib ${ROCR_INSTALL}/lib
 COPY --from=build ${HIP_INSTALL}/lib ${HIP_INSTALL}/lib
 COPY --from=build /app /app
 ENV LD_LIBRARY_PATH=${HIP_INSTALL}/lib:${ROCR_INSTALL}/lib:/app/lib:${ROCM_ROOT}/lib:${ROCM_ROOT}/lib64:${ROCM_ROOT}/lib/llvm/lib
+# fail the build if any runtime .so is unresolved (catches missing libs before deploy)
+RUN missing=$(ldd /app/llama-server /app/lib/*.so* 2>/dev/null | awk '/not found/{print $1}' | sort -u); \
+    if [ -n "$missing" ]; then echo "UNRESOLVED RUNTIME LIBS:"; echo "$missing"; exit 1; fi; \
+    /app/llama-server --version 2>&1 | head -3
 WORKDIR /app
 HEALTHCHECK CMD [ "curl", "-f", "http://localhost:8080/health" ]
 ENTRYPOINT [ "/app/llama-server" ]
