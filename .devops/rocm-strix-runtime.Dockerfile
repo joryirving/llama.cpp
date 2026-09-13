@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential ca-certificates cmake curl git libcurl4-openssl-dev \
       libdrm-dev libdw-dev libelf-dev libgl-dev libnuma-dev libpciaccess-dev \
       libssl-dev libudev-dev libzstd-dev ninja-build pciutils pkg-config \
-      python3 python3-pip python3-venv rocm-llvm-dev xxd zlib1g-dev \
+      python3 python3-pip python3-venv xxd zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 # python env used by the clr codegen (CppHeaderParser)
 RUN python3 -m venv /opt/venv \
@@ -30,6 +30,15 @@ RUN git clone --filter=blob:none --single-branch --branch ilintar-experiments \
     && git clone --filter=blob:none --single-branch --branch strix-halo \
       https://github.com/pwilkin/llama.cpp.git llama.cpp \
     && git -C llama.cpp -c advice.detachedHead=false checkout --detach ${LLAMA_COMMIT}
+
+# --- diagnostic: 7.14-full clang/llvm cmake presence + dev package name ---
+RUN set +e; \
+    echo "=== ClangConfig/LLVMConfig present? ==="; \
+    find / -name 'ClangConfig.cmake' -o -name 'LLVMConfig.cmake' 2>/dev/null; \
+    echo "=== llvm cmake dir ==="; ls -la /opt/rocm/lib/llvm/lib/cmake 2>/dev/null; \
+    echo "=== apt candidates for llvm/clang dev ==="; \
+    apt-get update >/dev/null 2>&1; apt-cache search rocm-llvm 2>/dev/null; apt-cache search 'llvm.*dev' 2>/dev/null | head; \
+    echo "=== end diagnostic ==="; true
 
 # --- custom ROCr runtime ---
 RUN PATH="/opt/venv/bin:${ROCM_ROOT}/bin:$PATH" cmake \
