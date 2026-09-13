@@ -95,7 +95,8 @@ ARG ROCM_ROOT=/opt/rocm
 ARG ROCR_INSTALL=/opt/custom/rocr
 ARG HIP_INSTALL=/opt/custom/hip
 ENV LLAMA_ARG_HOST=0.0.0.0
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 curl \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libgomp1 curl libdrm2 libnuma1 libelf1 libdw1 libzstd1 libpciaccess0 zlib1g libudev1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build ${ROCR_INSTALL}/lib ${ROCR_INSTALL}/lib
 COPY --from=build ${HIP_INSTALL}/lib ${HIP_INSTALL}/lib
