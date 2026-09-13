@@ -31,17 +31,11 @@ RUN git clone --filter=blob:none --single-branch --branch ilintar-experiments \
       https://github.com/pwilkin/llama.cpp.git llama.cpp \
     && git -C llama.cpp -c advice.detachedHead=false checkout --detach ${LLAMA_COMMIT}
 
-# --- diagnostic: where does this base image keep clang/llvm cmake configs? ---
-RUN set -x; \
-    echo "=== ClangConfig / LLVMConfig locations ==="; \
-    find / -name 'ClangConfig.cmake' -o -name 'LLVMConfig.cmake' 2>/dev/null; \
-    echo "=== /opt/rocm cmake dirs ==="; \
-    find /opt/rocm -type d -name cmake 2>/dev/null; \
-    echo "=== llvm tree ==="; \
-    ls -la /opt/rocm/lib/llvm 2>/dev/null; ls -la /opt/rocm/llvm 2>/dev/null; \
-    echo "=== clang binaries ==="; \
-    ls -la /opt/rocm/bin/*clang* /opt/rocm/lib/llvm/bin/*clang* 2>/dev/null; \
-    echo "=== end diagnostic ==="
+# --- trim trap-handler targets to gfx11 (gfx12 .s won't assemble on clang-22; unused on gfx1151) ---
+RUN f=rocm-systems/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/trap_handler/CMakeLists.txt; \
+    sed -i 's/set (TARGET_DEVS  *"gfx900;gfx942;gfx950;gfx1010;gfx1030;gfx1100;gfx1200;gfx1250")/set (TARGET_DEVS "gfx900;gfx942;gfx950;gfx1010;gfx1030;gfx1100")/' "$f"; \
+    sed -i 's/set (SOURCE_SUFFIX  *";;;;;;_gfx12;_gfx12")/set (SOURCE_SUFFIX ";;;;;")/' "$f"; \
+    grep -nE 'TARGET_DEVS|SOURCE_SUFFIX' "$f" | head
 
 # --- custom ROCr runtime ---
 RUN PATH="/opt/venv/bin:${ROCM_ROOT}/bin:$PATH" cmake \
