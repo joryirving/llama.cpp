@@ -3,7 +3,7 @@
 # provides the device-allocation path that lets --lazy-mode on-direct keep the
 # ~27.5GB PLE table off the device (stock ROCm can't).
 ARG ROCM_VERSION=7.2.4
-ARG BASE=docker.io/rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete
+ARG BASE=docker.io/rocm/dev-ubuntu-24.04:${ROCM_VERSION}-full
 
 FROM ${BASE} AS build
 ARG ROCM_ROOT=/opt/rocm
@@ -30,12 +30,6 @@ RUN git clone --filter=blob:none --single-branch --branch ilintar-experiments \
     && git clone --filter=blob:none --single-branch --branch strix-halo \
       https://github.com/pwilkin/llama.cpp.git llama.cpp \
     && git -C llama.cpp -c advice.detachedHead=false checkout --detach ${LLAMA_COMMIT}
-
-# --- trim trap-handler targets to gfx11 (gfx12 .s won't assemble on clang-22; unused on gfx1151) ---
-RUN f=rocm-systems/projects/rocr-runtime/runtime/hsa-runtime/core/runtime/trap_handler/CMakeLists.txt; \
-    sed -i 's/set (TARGET_DEVS  *"gfx900;gfx942;gfx950;gfx1010;gfx1030;gfx1100;gfx1200;gfx1250")/set (TARGET_DEVS "gfx900;gfx942;gfx950;gfx1010;gfx1030;gfx1100")/' "$f"; \
-    sed -i 's/set (SOURCE_SUFFIX  *";;;;;;_gfx12;_gfx12")/set (SOURCE_SUFFIX ";;;;;")/' "$f"; \
-    grep -nE 'TARGET_DEVS|SOURCE_SUFFIX' "$f" | head
 
 # --- custom ROCr runtime ---
 RUN PATH="/opt/venv/bin:${ROCM_ROOT}/bin:$PATH" cmake \
