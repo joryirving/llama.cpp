@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential ca-certificates cmake curl git libcurl4-openssl-dev \
       libdrm-dev libdw-dev libelf-dev libgl-dev libnuma-dev libpciaccess-dev \
       libssl-dev libudev-dev libzstd-dev ninja-build pciutils pkg-config \
-      python3 python3-pip python3-venv xxd zlib1g-dev \
+      python3 python3-pip python3-venv rocm-llvm-dev xxd zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 # python env used by the clr codegen (CppHeaderParser)
 RUN python3 -m venv /opt/venv \
