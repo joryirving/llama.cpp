@@ -1,13 +1,16 @@
 #version 450
 
 #extension GL_EXT_control_flow_attributes : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
 
 #include "types.glsl"
 
 // Exact top-k selection for rows too wide (or k too large) for the shared-memory
 // nary-search shader: iterative 8-bit radix selection on the order-preserving
 // unsigned transform of the keys, one workgroup per row, no temporary buffers.
-// The resulting indices are in no particular order (the ggml_top_k contract).
+// Output order is deterministic: keys above the threshold in ascending column
+// order, then the tied keys that fill the remaining slots, lowest columns first.
 // Ported to Vulkan from the HIP kernel in EngramHalo.cpp (Aristo94).
 
 layout(constant_id = 0) const int BLOCK_SIZE = 1024;
@@ -30,8 +33,7 @@ layout (push_constant) uniform parameter {
 shared uint hist[256];
 shared uint sh_prefix;
 shared uint sh_rank;
-shared uint sh_greater;
-shared uint sh_equal;
+shared uint sg_cnt[64];
 
 // map float bits to uint such that unsigned comparison matches float comparison
 uint f2ui(float x) {
@@ -93,26 +95,50 @@ void main() {
     }
 
     // gather: all elements strictly greater than the threshold key are in the top k,
-    // ties on the exact threshold fill the remaining `rank` slots
-    if (tid == 0u) {
-        sh_greater = 0u;
-        sh_equal   = 0u;
-    }
-    barrier();
-
+    // ties on the exact threshold fill the remaining `rank` slots.
+    //
+    // Slots come from an exclusive scan over the hit flags, one `wgs`-wide chunk at a
+    // time in ascending column order, so the output is identical on every run. An
+    // atomicAdd slot counter made the ORDER scheduling-dependent and, at the tie
+    // boundary, the SET as well: the QSA indexer width is top_k + ratio - 1, so the
+    // boundary block's `ratio` tied columns raced for `ratio - 1` slots and a different
+    // column lost each run. With the scan the lowest tied columns always win.
+    //
+    // The radix walk leaves count(key > threshold) == p.k - rank, so pass 0 fills
+    // exactly [0, p.k - rank) and pass 1 continues from there; the `slot < p.k` cap
+    // admits exactly `rank` ties.
     const uint threshold = prefix;
     const uint out_base  = row*p.k;
 
-    for (uint col = tid; col < p.ncols_input; col += wgs) {
-        const uint key = f2ui(data_a[base + col]);
-        if (key > threshold) {
-            const uint pos = atomicAdd(sh_greater, 1u);
-            data_d[out_base + pos] = int(col);
-        } else if (key == threshold) {
-            const uint pos = atomicAdd(sh_equal, 1u);
-            if (pos < rank) {
-                data_d[out_base + (p.k - rank) + pos] = int(col);
+    uint slot_base = 0u;
+    [[dont_unroll]] for (uint pass = 0u; pass < 2u; ++pass) {
+        for (uint c = 0u; c < p.ncols_input; c += wgs) {
+            const uint col = c + tid;
+            bool hit = false;
+            if (col < p.ncols_input) {
+                const uint key = f2ui(data_a[base + col]);
+                hit = (pass == 0u) ? (key > threshold) : (key == threshold);
             }
+            const uvec4 ballot  = subgroupBallot(hit);
+            const uint  rank_sg = subgroupBallotExclusiveBitCount(ballot);
+            const uint  cnt_sg  = subgroupBallotBitCount(ballot);
+            if (subgroupElect()) {
+                sg_cnt[gl_SubgroupID] = cnt_sg;
+            }
+            barrier();
+            uint sg_base = 0u;
+            uint total   = 0u;
+            for (uint sg = 0u; sg < gl_NumSubgroups; ++sg) {
+                const uint v = sg_cnt[sg];
+                sg_base += (sg < gl_SubgroupID) ? v : 0u;
+                total   += v;
+            }
+            const uint slot = slot_base + sg_base + rank_sg;
+            if (hit && slot < p.k) {
+                data_d[out_base + slot] = int(col);
+            }
+            slot_base += total;
+            barrier();
         }
     }
 }
