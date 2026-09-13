@@ -35,7 +35,12 @@ RUN git clone --filter=blob:none --single-branch --branch ilintar-experiments \
 RUN PATH="/opt/venv/bin:${ROCM_ROOT}/bin:$PATH" cmake \
       -S rocm-systems/projects/rocr-runtime -B rocr-build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=${ROCR_INSTALL} \
-      -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_PREFIX_PATH=${ROCM_ROOT} -DBUILD_SHARED_LIBS=ON \
+      -DCMAKE_INSTALL_LIBDIR=lib \
+      -DCMAKE_PREFIX_PATH="${ROCM_ROOT};${ROCM_ROOT}/lib/llvm" \
+      -DClang_ROOT=${ROCM_ROOT}/lib/llvm -DLLVM_ROOT=${ROCM_ROOT}/lib/llvm \
+      -DClang_DIR=${ROCM_ROOT}/lib/llvm/lib/cmake/clang \
+      -DLLVM_DIR=${ROCM_ROOT}/lib/llvm/lib/cmake/llvm \
+      -DBUILD_SHARED_LIBS=ON \
     && PATH="/opt/venv/bin:${ROCM_ROOT}/bin:$PATH" cmake --build rocr-build --parallel "$(nproc)" \
     && PATH="/opt/venv/bin:${ROCM_ROOT}/bin:$PATH" cmake --install rocr-build \
     && test -e ${ROCR_INSTALL}/lib/libhsa-runtime64.so.1 \
