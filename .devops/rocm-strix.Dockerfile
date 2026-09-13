@@ -23,7 +23,7 @@ RUN HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
         -DGGML_HIP_MMQ_MFMA=ON \
         -DGGML_HIP_RCCL=OFF \
         -DGGML_CUDA_FA=ON \
-        -DGGML_CUDA_FA_ALL_QUANTS=OFF \
+        -DGGML_CUDA_FA_ALL_QUANTS=ON \
         -DGGML_VULKAN=OFF \
         -DLLAMA_CURL=ON \
         -DLLAMA_BUILD_TESTS=OFF \
