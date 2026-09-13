@@ -31,6 +31,18 @@ RUN git clone --filter=blob:none --single-branch --branch ilintar-experiments \
       https://github.com/pwilkin/llama.cpp.git llama.cpp \
     && git -C llama.cpp -c advice.detachedHead=false checkout --detach ${LLAMA_COMMIT}
 
+# --- diagnostic: where does this base image keep clang/llvm cmake configs? ---
+RUN set -x; \
+    echo "=== ClangConfig / LLVMConfig locations ==="; \
+    find / -name 'ClangConfig.cmake' -o -name 'LLVMConfig.cmake' 2>/dev/null; \
+    echo "=== /opt/rocm cmake dirs ==="; \
+    find /opt/rocm -type d -name cmake 2>/dev/null; \
+    echo "=== llvm tree ==="; \
+    ls -la /opt/rocm/lib/llvm 2>/dev/null; ls -la /opt/rocm/llvm 2>/dev/null; \
+    echo "=== clang binaries ==="; \
+    ls -la /opt/rocm/bin/*clang* /opt/rocm/lib/llvm/bin/*clang* 2>/dev/null; \
+    echo "=== end diagnostic ==="
+
 # --- custom ROCr runtime ---
 RUN PATH="/opt/venv/bin:${ROCM_ROOT}/bin:$PATH" cmake \
       -S rocm-systems/projects/rocr-runtime -B rocr-build -G Ninja \
