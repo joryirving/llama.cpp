@@ -41,6 +41,7 @@ RUN set +e; \
     echo "=== end diagnostic ==="; true
 
 # --- custom ROCr runtime ---
+RUN sh -c 'echo "===DIAG==="; echo "[cmake dir]"; ls -la /opt/rocm/lib/llvm/lib/cmake 2>&1 | head -20; echo "[find ClangConfig]"; find /opt -name ClangConfig.cmake 2>/dev/null | head; find /usr -name ClangConfig.cmake 2>/dev/null | head; echo "[llvm/clang pkgs]"; dpkg -l 2>/dev/null | grep -iE "llvm|clang" | head -20; echo "===ENDDIAG==="; true' 
 RUN PATH="/opt/venv/bin:${ROCM_ROOT}/bin:$PATH" cmake \
       -S rocm-systems/projects/rocr-runtime -B rocr-build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=${ROCR_INSTALL} \
