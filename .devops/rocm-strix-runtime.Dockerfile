@@ -3,7 +3,7 @@
 # provides the device-allocation path that lets --lazy-mode on-direct keep the
 # ~27.5GB PLE table off the device (stock ROCm can't).
 ARG ROCM_VERSION=7.2.4
-ARG BASE=docker.io/rocm/dev-ubuntu-24.04:${ROCM_VERSION}-full
+ARG BASE=docker.io/rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete
 
 FROM ${BASE} AS build
 ARG ROCM_ROOT=/opt/rocm
