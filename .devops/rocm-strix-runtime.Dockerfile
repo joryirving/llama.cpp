@@ -3,7 +3,7 @@
 # provides the device-allocation path that lets --lazy-mode on-direct keep the
 # ~27.5GB PLE table off the device (stock ROCm can't).
 ARG ROCM_VERSION=7.2.4
-ARG BASE=docker.io/rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete
+ARG BASE=docker.io/rocm/dev-ubuntu-24.04:${ROCM_VERSION}-full
 
 FROM ${BASE} AS build
 ARG ROCM_ROOT=/opt/rocm
@@ -14,7 +14,7 @@ ARG ROCM_SYS_COMMIT=7dda3ac6cfe6bbe0b7f08c23a67cfa118d8641a1
 ARG LLAMA_COMMIT=d67d58836b4987fa9dbc03b3d87c95eae6ceaddf
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential rocm-llvm-dev ca-certificates cmake curl git libcurl4-openssl-dev \
+      build-essential ca-certificates cmake curl git libcurl4-openssl-dev \
       libdrm-dev libdw-dev libelf-dev libgl-dev libnuma-dev libpciaccess-dev \
       libssl-dev libudev-dev libzstd-dev ninja-build pciutils pkg-config \
       python3 python3-pip python3-venv xxd zlib1g-dev \
