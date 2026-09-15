@@ -11,7 +11,7 @@ ARG ROCR_INSTALL=/opt/custom/rocr
 ARG HIP_INSTALL=/opt/custom/hip
 ARG GPU_TARGET=gfx1151
 ARG ROCM_SYS_COMMIT=7dda3ac6cfe6bbe0b7f08c23a67cfa118d8641a1
-ARG LLAMA_COMMIT=f5daaa3cfa6358e5dd398911ec741813745a5440
+ARG LLAMA_COMMIT=d67d58836b4987fa9dbc03b3d87c95eae6ceaddf
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential ca-certificates cmake curl git libcurl4-openssl-dev \
