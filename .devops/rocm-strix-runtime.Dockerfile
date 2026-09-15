@@ -14,7 +14,7 @@ ARG ROCM_SYS_COMMIT=7dda3ac6cfe6bbe0b7f08c23a67cfa118d8641a1
 ARG LLAMA_COMMIT=d67d58836b4987fa9dbc03b3d87c95eae6ceaddf
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential ca-certificates cmake curl git libcurl4-openssl-dev \
+      build-essential rocm-llvm-dev ca-certificates cmake curl git libcurl4-openssl-dev \
       libdrm-dev libdw-dev libelf-dev libgl-dev libnuma-dev libpciaccess-dev \
       libssl-dev libudev-dev libzstd-dev ninja-build pciutils pkg-config \
       python3 python3-pip python3-venv xxd zlib1g-dev \
@@ -41,7 +41,6 @@ RUN set +e; \
     echo "=== end diagnostic ==="; true
 
 # --- custom ROCr runtime ---
-RUN sh -c 'echo "===DIAG==="; echo "[cmake dir]"; ls -la /opt/rocm/lib/llvm/lib/cmake 2>&1 | head -20; echo "[find ClangConfig]"; find /opt -name ClangConfig.cmake 2>/dev/null | head; find /usr -name ClangConfig.cmake 2>/dev/null | head; echo "[llvm/clang pkgs]"; dpkg -l 2>/dev/null | grep -iE "llvm|clang" | head -20; echo "===ENDDIAG==="; true' 
 RUN PATH="/opt/venv/bin:${ROCM_ROOT}/bin:$PATH" cmake \
       -S rocm-systems/projects/rocr-runtime -B rocr-build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=${ROCR_INSTALL} \
